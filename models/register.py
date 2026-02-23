@@ -33,7 +33,6 @@ def register_user(username, password, role="user"):
     finally:
         conn.close()
 
-
 def login_user(username, password):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -45,4 +44,5 @@ def login_user(username, password):
 
     user = cursor.fetchone()
     conn.close()
+
     return user

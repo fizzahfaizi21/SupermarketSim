@@ -14,3 +14,16 @@ class UserSession:
 
     def get_curr_user(self):
         return self.curr_user
+    
+current_user = None
+
+def login(user):
+    global current_user
+    current_user = user
+
+def logout():
+    global current_user
+    current_user = None
+
+def get_current_user():
+    return current_user

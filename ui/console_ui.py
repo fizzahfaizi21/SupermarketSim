@@ -1,5 +1,7 @@
 from models.register import register_user, login_user
 from systems.session import UserSession
+from models.register import login_user
+from systems.session import login
 
 session = UserSession()
 
@@ -20,8 +22,9 @@ def login_menu():
     password = input("Password: ")
 
     user = login_user(username, password)
+
     if user:
-        session.set_curr_user(user)
+        login(user)
         print(f"Welcome, {user[1]}!")
     else:
         print("Invalid credentials.")
