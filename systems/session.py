@@ -27,3 +27,9 @@ def logout():
 
 def get_current_user():
     return current_user
+
+from systems.session import logout
+
+def logout_menu():
+    logout()
+    print("You have been logged out.")
