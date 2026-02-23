@@ -1,0 +1,16 @@
+class UserSession:
+    def __init__(self):
+        self.curr_user = None
+
+    def set_curr_user(self, user):
+        self.curr_user = user
+
+    def logout(self):
+        if self.curr_user is None:
+            print("No user is currently logged in.")
+        else:
+            print(f"{self.curr_user[1]} has been logged out.")
+            self.curr_user = None
+
+    def get_curr_user(self):
+        return self.curr_user
