@@ -33,3 +33,14 @@ from systems.session import logout
 def logout_menu():
     logout()
     print("You have been logged out.")
+
+from systems.session import get_current_user
+
+def is_admin():
+    user = get_current_user()
+    return user and user[2] == "admin"
+def admin_panel():
+    if not is_admin():
+        print("Access denied.")
+        return
+    print("Welcome to Admin Panel")

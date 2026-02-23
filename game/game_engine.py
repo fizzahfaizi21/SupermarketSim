@@ -7,3 +7,4 @@ class GameEngine:
     def run(self):
         while self.simulation.is_running():
             self.simulation.update()
+            
