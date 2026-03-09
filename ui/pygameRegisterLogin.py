@@ -3,6 +3,7 @@ import pygame_widgets
 from pygame_widgets.button import Button
 from pygame_widgets.textbox import TextBox
 #for connecting to user to db database
+
 from models import register as db_registeration
 
 pygame.init()
@@ -23,15 +24,16 @@ def drawText(text,fontSize, text_color,xPos,yPos):
 def submitInfo(user,pwd):
     print(user)
     print(pwd)
-    if len(minimumUserLength) > 5 and len(minimumPassLength) > 5:
+    if len(user) > minimumUserLength and len(pwd) > minimumPassLength:
         if register:
             #add to database 
-            print("username is: " + user + " Password is: " + pwd)
+            print("new user.\n username is: " + user + ", Password is: " + pwd)
             db_registeration.register_user(user,pwd)
-            hideLogin()
         elif register == False:
             #Login
+            
             db_registeration.login_user(user,pwd)
+
             hideLogin()
 
 
