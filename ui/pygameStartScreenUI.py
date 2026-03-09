@@ -27,25 +27,26 @@ password_Text = TextBox(screen, 100, 100, 150, 30, fontSize=12, borderColour=(0,
  )
 submitBtn = Button(screen, 10, 150, 100, 50,text = "submit", FontSize = 24, onClick=lambda: submitInfo(username_Text.getText(),password_Text.getText()))
 
+def main():
+    run = True
+    while run:
+        events = pygame.event.get()
+        for event in events:
+            
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                run = False
+                quit()
+        #print(username_Text.getText())
+        screen.fill((255, 255, 255))
+        register = drawText("=== Register ===", 24,(0,0,0),10,50)
+        drawText("Username: ", 24,(0,0,0),10, 70)
+        drawText("Password: ", 24,(0,0,0),10, 100)
 
-run = True
-while run:
-    events = pygame.event.get()
-    for event in events:
-        
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            run = False
-            quit()
-    #print(username_Text.getText())
-    screen.fill((255, 255, 255))
-    register = drawText("=== Register ===", 24,(0,0,0),10,50)
-    drawText("Username: ", 24,(0,0,0),10, 70)
-    drawText("Password: ", 24,(0,0,0),10, 100)
 
+        # Now
+        pygame_widgets.update(events)
 
-    # Now
-    pygame_widgets.update(events)
-
-    # Instead of
-    pygame.display.update()
+        # Instead of
+        pygame.display.update()
+main()
