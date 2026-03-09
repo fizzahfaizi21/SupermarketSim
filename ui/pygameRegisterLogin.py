@@ -2,11 +2,17 @@ import pygame
 import pygame_widgets
 from pygame_widgets.button import Button
 from pygame_widgets.textbox import TextBox
+#for connecting to user to db database
+from models import register as db_registeration
 
 pygame.init()
 username = '' 
 password = ''
 register = True;
+
+
+minimumUserLength = 5
+minimumPassLength = 5
 
 
 def drawText(text,fontSize, text_color,xPos,yPos):
@@ -17,13 +23,15 @@ def drawText(text,fontSize, text_color,xPos,yPos):
 def submitInfo(user,pwd):
     print(user)
     print(pwd)
-    if len(user) > 5 and len(pwd) > 5:
+    if len(minimumUserLength) > 5 and len(minimumPassLength) > 5:
         if register:
             #add to database 
             print("username is: " + user + " Password is: " + pwd)
+            db_registeration.register_user(user,pwd)
             hideLogin()
         elif register == False:
             #Login
+            db_registeration.login_user(user,pwd)
             hideLogin()
 
 
@@ -82,6 +90,8 @@ def main():
         else:
             LoginBtn.inactiveColour = (100,100,100)
             registerBtn.inactiveColour = (200,200,200)
+
+        #quit using top left quit button
         events = pygame.event.get()
         for event in events:
             
@@ -89,6 +99,7 @@ def main():
                 pygame.quit()
                 run = False
                 quit()
+
         screen.fill((255, 255, 255))
         #changes top text to show player whether they are logging in or registering
         if register:
