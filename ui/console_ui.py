@@ -1,7 +1,7 @@
 from models.register import register_user, login_user
 from systems.session import login, logout, get_current_user, is_admin
 
-ADMIN_SECRET_CODE = "supermarket123"  # Change this to something only you know
+ADMIN_SECRET_CODE = "supermarket123"  # something only company knows
 
 
 def registration_menu():
@@ -54,4 +54,3 @@ def admin_panel():
     print("2. Reset inventory (coming soon)")
     print("3. Back")
     choice = input("> ").strip()
-    # Expand this as needed
