@@ -1,0 +1,83 @@
+# config/settings.py
+
+from __future__ import annotations
+
+TITLE = "ByteBit Market"
+WIDTH = 1440
+HEIGHT = 860
+FPS = 60
+
+# ---------- Theme ----------
+BG_TOP = (20, 22, 36)          # #141624
+BG_BOTTOM = (30, 30, 47)       # #1E1E2F
+PANEL = (42, 42, 64)           # #2A2A40
+PANEL_ALT = (52, 52, 78)
+CARD = (36, 38, 58)
+CARD_DARK = (28, 30, 46)
+
+ACCENT = (76, 175, 80)         # #4CAF50
+ACCENT_2 = (255, 213, 79)      # #FFD54F
+SUCCESS = (88, 214, 141)
+WARNING = (255, 199, 94)
+DANGER = (255, 107, 107)       # #FF6B6B
+INFO = (116, 185, 255)
+
+TEXT = (245, 245, 245)         # #F5F5F5
+TEXT_MUTED = (182, 187, 206)
+TEXT_DARK = (28, 32, 44)
+OUTLINE = (82, 87, 112)
+
+SHADOW = (0, 0, 0, 92)
+SOFT_GLOW = (255, 255, 255, 22)
+ZONE_GLOW = (76, 175, 80)
+
+# ---------- Store ----------
+FLOOR = (226, 231, 240)
+AISLE = (210, 216, 226)
+WOOD = (112, 84, 62)
+SHELF = (154, 116, 84)
+FRIDGE = (196, 222, 245)
+REGISTER = (77, 94, 135)
+PLAYER = (255, 214, 153)
+CUSTOMER = (124, 146, 255)
+
+# ---------- Fonts ----------
+BIG_TITLE = 38
+TITLE_SIZE = 24
+BODY_SIZE = 17
+SMALL_SIZE = 14
+BUTTON_TEXT_SIZE = 18
+
+FONT_STACK = ["Inter", "Poppins", "Montserrat", "Segoe UI", "Arial"]
+
+# ---------- Motion ----------
+UI_ANIM_SPEED = 10.0
+BUTTON_HOVER_SCALE = 1.05
+BUTTON_CLICK_SCALE = 0.96
+SCENE_FADE_SPEED = 520
+OVERLAY_FADE_SPEED = 8.5
+TOAST_LIFETIME = 2.75
+TOAST_SLIDE_SPEED = 10.0
+NUMBER_LERP_SPEED = 8.5
+CUSTOMER_FADE_SPEED = 3.5
+PANEL_SLIDE_DISTANCE = 18
+
+# ---------- Gameplay ----------
+DAY_LENGTH_SECONDS = 90
+CUSTOMER_SPAWN_MIN = 5.0
+CUSTOMER_SPAWN_MAX = 10.0
+MAX_CUSTOMERS = 8
+
+PLAYER_SPEED = 260
+STRESS_TICK = 3.0
+FATIGUE_TICK = 2.0
+SHELF_CAPACITY = 12
+BREAK_RECOVERY = 26
+PROMO_COST = 120
+PROMO_EFFECT_SECONDS = 45
+STORAGE_REPLENISH = 4
+
+# ---------- Audio ----------
+UI_CLICK_VOLUME = 0.22
+UI_HOVER_VOLUME = 0.12
+ENABLE_SFX = True
