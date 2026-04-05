@@ -79,7 +79,7 @@ class CustomerCard:
         bar_label = font_sm.render("Patience", True, TEXT_SECONDARY)
         surface.blit(bar_label, (x0, y0))
         bar_x = x0 + 75
-        bar_w = self.rect.w - 100
+        bar_w = self.rect.w - 150
         bar_h = 8
         pygame.draw.rect(surface, PANEL_BORDER, (bar_x, y0 + 3, bar_w, bar_h), border_radius=4)
         fill = int(bar_w * c["patience_lvl"] / 100)
@@ -93,7 +93,7 @@ class CustomerCard:
         sat_label = font_sm.render("Satisfaction", True, TEXT_SECONDARY)
         surface.blit(sat_label, (x0, y0))
         bar_x2 = x0 + 85
-        bar_w2 = self.rect.w - 110
+        bar_w2 = self.rect.w - 160
         pygame.draw.rect(surface, PANEL_BORDER, (bar_x2, y0 + 3, bar_w2, bar_h), border_radius=4)
         fill2 = int(bar_w2 * c["satisfaction"] / 100)
         sat_color = ACCENT_GREEN if c["satisfaction"] > 60 else (ACCENT_YELLOW if c["satisfaction"] > 30 else ACCENT_RED)
@@ -163,9 +163,9 @@ class CustomerTrackerScreen:
     def _build_cards(self):
         self.cards.clear()
         cols, rows = 2, 4
-        card_w = (self.width - 280) // cols - 16
+        card_w = (self.width - 190) // cols - 16
         card_h = 130
-        start_x, start_y = 220, 110
+        start_x, start_y = 190, 110
         gap_x, gap_y = 16, 14
         for i, cust in enumerate(self.customers):
             col = i % cols
@@ -191,9 +191,9 @@ class CustomerTrackerScreen:
 
     def _draw_sidebar(self):
         s = self.stats
-        panel = pygame.Rect(0, 0, 210, self.height)
+        panel = pygame.Rect(0, 0, 180, self.height)
         pygame.draw.rect(self.screen, PANEL_BG, panel)
-        pygame.draw.line(self.screen, PANEL_BORDER, (210, 0), (210, self.height), 1)
+        pygame.draw.line(self.screen, PANEL_BORDER, (180, 0), (180, self.height), 1)
 
         y = 20
         title = self.font_lg.render("Customer", True, ACCENT_BLUE)
@@ -216,7 +216,7 @@ class CustomerTrackerScreen:
 
         # Legend
         y = self.height - 160
-        pygame.draw.line(self.screen, PANEL_BORDER, (12, y), (198, y), 1)
+        pygame.draw.line(self.screen, PANEL_BORDER, (12, y), (168, y), 1)
         y += 12
         leg = self.font_xs.render("MOOD LEGEND", True, TEXT_DIM)
         self.screen.blit(leg, (16, y)); y += 18
@@ -228,14 +228,14 @@ class CustomerTrackerScreen:
             self.screen.blit(ml, (30, y)); y += 18
 
     def _draw_header(self):
-        header = pygame.Rect(210, 0, self.width - 210, 95)
+        header = pygame.Rect(180, 0, self.width - 180, 95)
         pygame.draw.rect(self.screen, PANEL_BG, header)
-        pygame.draw.line(self.screen, PANEL_BORDER, (210, 95), (self.width, 95), 1)
+        pygame.draw.line(self.screen, PANEL_BORDER, (180, 95), (self.width, 95), 1)
 
         title = self.font_lg.render("Live Customer Activity", True, TEXT_PRIMARY)
-        self.screen.blit(title, (228, 18))
+        self.screen.blit(title, (188, 18))
         sub = self.font_sm.render("Real-time tracking of all active customers in the store", True, TEXT_SECONDARY)
-        self.screen.blit(sub, (228, 48))
+        self.screen.blit(sub, (188, 48))
 
         # Day badge
         badge_txt = self.font_sm.render("Day 4 | 2:30 PM", True, ACCENT_BLUE)
