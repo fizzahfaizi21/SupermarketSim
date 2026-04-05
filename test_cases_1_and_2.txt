@@ -1,0 +1,116 @@
+# Test Cases for Stock Shelves and Customer Transaction
+
+## Stock Shelves Test Cases
+
+### Test Case ID: TC_SS_001
+**Description:** Happy path - Successfully stock shelves with correct category and available inventory.
+**Inputs:** Product: "Apple", Category: "Fruits", Quantity: 10, Current Inventory: 50
+**Expected Results:** Inventory decreases by 10, shelves stocked successfully, no error message.
+**Dependencies:** Inventory system, product database.
+**Initialization:** Ensure product exists in inventory with sufficient quantity.
+**Steps:**
+1. Select "Stock Shelves" option.
+2. Enter product name "Apple".
+3. Enter category "Fruits".
+4. Enter quantity 10.
+5. Confirm stocking.
+
+### Test Case ID: TC_SS_002
+**Description:** Full shelf - Attempt to stock shelves when shelf is already at maximum capacity.
+**Inputs:** Product: "Milk", Category: "Dairy", Quantity: 5, Shelf Capacity: 20, Current Shelf Stock: 20
+**Expected Results:** Error message "Shelf is full", inventory unchanged, stocking fails.
+**Dependencies:** Inventory system, shelf capacity tracking.
+**Initialization:** Fill shelf to maximum capacity.
+**Steps:**
+1. Select "Stock Shelves" option.
+2. Enter product name "Milk".
+3. Enter category "Dairy".
+4. Enter quantity 5.
+5. Confirm stocking.
+
+### Test Case ID: TC_SS_003
+**Description:** Wrong category - Attempt to stock product in incorrect category.
+**Inputs:** Product: "Bread", Correct Category: "Bakery", Entered Category: "Fruits", Quantity: 5
+**Expected Results:** Error message "Product category mismatch", inventory unchanged, stocking fails.
+**Dependencies:** Product database with category validation.
+**Initialization:** Ensure product has defined category.
+**Steps:**
+1. Select "Stock Shelves" option.
+2. Enter product name "Bread".
+3. Enter category "Fruits" (incorrect).
+4. Enter quantity 5.
+5. Confirm stocking.
+
+### Test Case ID: TC_SS_004
+**Description:** Empty inventory - Attempt to stock shelves when product inventory is zero.
+**Inputs:** Product: "Orange", Category: "Fruits", Quantity: 5, Current Inventory: 0
+**Expected Results:** Error message "Insufficient inventory", stocking fails.
+**Dependencies:** Inventory system.
+**Initialization:** Set product inventory to zero.
+**Steps:**
+1. Select "Stock Shelves" option.
+2. Enter product name "Orange".
+3. Enter category "Fruits".
+4. Enter quantity 5.
+5. Confirm stocking.
+
+## Customer Transaction Test Cases
+
+### Test Case ID: TC_CT_001
+**Description:** Cash payment with correct change - Customer pays with cash and receives correct change.
+**Inputs:** Total Amount: $15.50, Cash Tendered: $20.00
+**Expected Results:** Change: $4.50, transaction successful, receipt generated.
+**Dependencies:** Checkout system, cash handling.
+**Initialization:** Start transaction with items totaling $15.50.
+**Steps:**
+1. Scan items totaling $15.50.
+2. Select cash payment.
+3. Enter cash amount $20.00.
+4. Process payment.
+
+### Test Case ID: TC_CT_002
+**Description:** Cash payment with wrong change - System calculates incorrect change.
+**Inputs:** Total Amount: $12.75, Cash Tendered: $15.00, System Error: Calculates change as $3.25 instead of $2.25
+**Expected Results:** Error detected, transaction voided, correct change calculation triggered.
+**Dependencies:** Checkout system, error handling.
+**Initialization:** Simulate calculation error in system.
+**Steps:**
+1. Scan items totaling $12.75.
+2. Select cash payment.
+3. Enter cash amount $15.00.
+4. Process payment and verify change.
+
+### Test Case ID: TC_CT_003
+**Description:** AI complaint dialogue - Customer complains about service, AI handles dialogue.
+**Inputs:** Customer Mood: Angry, Complaint: "Long wait time"
+**Expected Results:** AI dialogue initiated, apology given, possible discount offered, customer satisfaction improves.
+**Dependencies:** AI customer system, dialogue engine.
+**Initialization:** Set customer mood to angry.
+**Steps:**
+1. Customer approaches checkout.
+2. Customer initiates complaint.
+3. AI responds with dialogue.
+
+### Test Case ID: TC_CT_004
+**Description:** Card payment approved - Credit card payment is approved.
+**Inputs:** Total Amount: $25.00, Card Type: Visa, Card Number: Valid, Expiration: Future date
+**Expected Results:** Payment approved, transaction successful, receipt generated.
+**Dependencies:** Payment processing system.
+**Initialization:** Use valid test card details.
+**Steps:**
+1. Scan items totaling $25.00.
+2. Select card payment.
+3. Swipe/enter card details.
+4. Process payment.
+
+### Test Case ID: TC_CT_005
+**Description:** Card payment declined - Credit card payment is declined due to insufficient funds.
+**Inputs:** Total Amount: $30.00, Card Type: Mastercard, Card Number: Valid but insufficient funds
+**Expected Results:** Payment declined, error message "Insufficient funds", transaction fails.
+**Dependencies:** Payment processing system.
+**Initialization:** Use test card with insufficient funds.
+**Steps:**
+1. Scan items totaling $30.00.
+2. Select card payment.
+3. Swipe/enter card details.
+4. Process payment.
