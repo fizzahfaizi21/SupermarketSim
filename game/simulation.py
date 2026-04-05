@@ -64,6 +64,7 @@ class Simulation:
             self.customers_served += 1
             self.score += 10
             print(f"Customer bought {quantity}x {item_name} for ${earned:.2f}. Nice!")
+        input("Press enter to continue...")
 
     def _restock_item(self):
         print("Which item to restock?")
@@ -87,12 +88,15 @@ class Simulation:
                 print("Invalid selection.")
         except ValueError:
             print("Please enter a number.")
+        input("Press enter to continue...")
 
     def _end_day(self):
         print(f"\nDay {self.day} complete! Customers served today: {self.customers_served}")
         self.day += 1
         if self.day > self.max_days:
             self._game_over()
+        else:
+            input("Press enter to continue...")
 
     def _game_over(self):
         print("\n=== Game Over ===")
