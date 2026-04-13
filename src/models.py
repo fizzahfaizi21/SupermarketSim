@@ -25,6 +25,33 @@ COMPLAINTS = [
     ("Your shelf was almost empty.", ["Promise a restock", "Say it is not your problem"], 9),
 ]
 
+AD_CAMPAIGNS = {
+    "flyer": {
+        "name": "Flyer Drop",
+        "cost": 60,
+        "spawn_multiplier": 0.78,   # lower spawn_timer = more frequent customers
+        "duration_hours": 4,        # in game-hours (real seconds = duration * DAY_LENGTH / 24)
+        "desc": "Low-budget leaflets. Modest traffic bump for a few hours.",
+        "color": (140, 200, 100),
+    },
+    "billboard": {
+        "name": "Billboard",
+        "cost": 180,
+        "spawn_multiplier": 0.58,
+        "duration_hours": 8,
+        "desc": "City billboard. Strong traffic boost all morning.",
+        "color": (80, 160, 230),
+    },
+    "tv_ad": {
+        "name": "TV Ad",
+        "cost": 420,
+        "spawn_multiplier": 0.38,
+        "duration_hours": 24,
+        "desc": "Prime-time television. Maximum customer surge all day.",
+        "color": (220, 120, 60),
+    },
+}
+
 UPGRADES = {
     "scanner": {"name": "Fast Scanner", "cost": 180, "desc": "Reduces checkout errors"},
     "shelves": {"name": "Premium Shelves", "cost": 220, "desc": "Increases shelf capacity"},
@@ -38,6 +65,20 @@ STAFF_POOL = [
     {"name": "Ethan", "role": "stocker", "wage": 60, "skill": 4},
     {"name": "Luna", "role": "assistant", "wage": 72, "skill": 5},
 ]
+
+# ── AI dialogue ───────────────────────────────────────────────────────────────
+# Maps customer mood to a brief personality archetype fed to the Anthropic API.
+CUSTOMER_ARCHETYPES = {
+    "happy":   "You are a cheerful, friendly grocery shopper. You are upbeat and easy to deal with.",
+    "neutral": "You are a tired but polite grocery shopper. You just want to get your items and go.",
+    "angry":   "You are an impatient, irritable grocery shopper. You are quick to complain.",
+}
+
+AI_DIALOGUE_SYSTEM = (
+    "You are a customer in a grocery store simulation game called Bytebit Market. "
+    "Respond with a single short sentence of natural in-character dialogue (max 18 words). "
+    "No quotation marks, no stage directions, no emojis. Just the spoken line."
+)
 
 REVIEW_TEMPLATES = {
     "great": ["Fast service and a clean store.", "Loved the checkout experience.", "Great prices and stocked shelves."],
@@ -106,6 +147,11 @@ class GameState:
     fatigue: int = 8
     satisfaction: int = 78
     popularity_boost_until: float = 0.0
+    # day/night cycle: 0.0–1.0 fraction through the current day (driven by day_timer)
+    day_phase: float = 0.0          # 0 = dawn, 0.5 = midday, 1 = night
+    # active ad campaign
+    active_campaign: str = ""                   # key into AD_CAMPAIGNS or ""
+    campaign_ends_at: float = 0.0               # time.time() value when campaign expires
     customers_served: int = 0
     sales_today: float = 0.0
     reviews: List[dict] = field(default_factory=list)
@@ -131,6 +177,9 @@ class GameState:
             "fatigue": self.fatigue,
             "satisfaction": self.satisfaction,
             "popularity_boost_until": self.popularity_boost_until,
+            "day_phase": self.day_phase,
+            "active_campaign": self.active_campaign,
+            "campaign_ends_at": self.campaign_ends_at,
             "customers_served": self.customers_served,
             "sales_today": round(self.sales_today, 2),
             "reviews": self.reviews,
@@ -139,6 +188,9 @@ class GameState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "GameState":
+        data.setdefault("day_phase", 0.0)
+        data.setdefault("active_campaign", "")
+        data.setdefault("campaign_ends_at", 0.0)
         return cls(**data)
 
 
