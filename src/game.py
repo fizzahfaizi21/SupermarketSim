@@ -536,7 +536,6 @@ class App:
                     raise Exception("GEMINI_MODEL not configured")
 
                 print("Gemini model:", gemini_model)
-                self.toasts.show(f"Using Gemini model: {gemini_model}", INFO, duration=3.0)
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(
                     model=gemini_model,
@@ -545,9 +544,7 @@ class App:
                 line = response.text.strip().strip('"')
                 self.dialogue_line = line
             except Exception as e:
-                error_text = f"Gemini error: {e}"
-                print(error_text)
-                self.toasts.show(error_text, DANGER, duration=4.0)
+                print(f"Gemini error: {e}")
                 moods = {
                     "happy":   "Hi there! Lovely store you have here.",
                     "neutral": "Excuse me, can I get some help?",
