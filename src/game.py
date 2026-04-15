@@ -7,7 +7,7 @@ import random
 import sys
 import time
 from typing import Dict, List, Optional
-
+from Dialogue import customer_dialogues
 import pygame
 
 from config.settings import *
@@ -548,6 +548,8 @@ class App:
             "patience": customer_obj.patience,
             "items": customer_obj.items,
             "complaint": customer_obj.complaint,
+            "posResponse": customer_obj.posRes,
+            "negResponse": customer_obj.negRes,
             "expected_total": customer_obj.expected_total,
             "pay_with": customer_obj.pay_with,
             "cash_given": customer_obj.cash_given,
@@ -2707,10 +2709,11 @@ class App:
         draw_text(self.screen, f"Total: ${self.current_customer['expected_total']:.2f}", (left.x + 22, left.bottom - 72), size=TITLE_SIZE, bold=True)
 
         if self.current_customer.get("complaint"):
+            print("responses: " + self.current_customer["posResponse"],self.current_customer["negResponse"])
             draw_text(self.screen, "Complaint", (right.x + 24, right.y + 24), size=TITLE_SIZE, bold=True)
             draw_text(self.screen, self.current_customer["complaint"], (right.x + 24, right.y + 76), size=BODY_SIZE, color=TEXT_MUTED)
-            draw_text(self.screen, "1. Good response", (right.x + 24, right.y + 142), size=BODY_SIZE, color=SUCCESS)
-            draw_text(self.screen, "2. Poor response", (right.x + 24, right.y + 178), size=BODY_SIZE, color=DANGER)
+            draw_text(self.screen, "1: " + self.current_customer["posResponse"], (right.x + 24, right.y + 142), size=BODY_SIZE, color=SUCCESS)
+            draw_text(self.screen, "2: " + self.current_customer["negResponse"], (right.x + 24, right.y + 178), size=BODY_SIZE, color=DANGER)
 
         pay_y = right.y + 280
         if self.current_customer["pay_with"] == "cash":

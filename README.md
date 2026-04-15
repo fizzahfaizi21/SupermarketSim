@@ -1,6 +1,6 @@
 # ByteBit Market - Pygame + Firebase Supermarket Simulator
 
-This is a polished class-project implementation of the supermarket simulator described in your sprint docs.
+This is a polished class-project implementation of the supermarket simulator described in the sprint docs.
 
 ## Included features
 - Firebase email/password registration, login, and local logout

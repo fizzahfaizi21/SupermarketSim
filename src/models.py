@@ -19,11 +19,11 @@ SHELF_LAYOUT = {
     "produce": "apple",
 }
 
-COMPLAINTS = [
-    ("This line is taking too long.", ["Apologize and speed up", "Ignore it"], 8),
-    ("That price looks too high.", ["Explain today’s demand", "Tell them to deal with it"], 10),
-    ("Your shelf was almost empty.", ["Promise a restock", "Say it is not your problem"], 9),
-]
+COMPLAINTS = {
+    "This line is taking too long.": ["Apologize and speed up", "Ignore it"],
+    "That price looks too high.": ["Explain today’s demand", "Tell them to deal with it"],
+    "Your shelf was almost empty.": ["Promise a restock", "Say it is not your problem"]
+}
 
 AD_CAMPAIGNS = {
     "flyer": {
@@ -105,6 +105,8 @@ class Customer:
     patience: int
     items: Dict[str, int]
     complaint: str = ""
+    posRes: str = ""
+    negRes: str = ""
     expected_total: float = 0.0
     pay_with: str = "cash"
     cash_given: float = 0.0
@@ -205,8 +207,13 @@ def random_customer(customer_id: int, prices: Dict[str, float], demand: Dict[str
         items[product_key] = qty
         total += prices[product_key] * qty
     complaint = ""
+    posRes=""
+    negRes=""
     if random.random() < 0.35:
-        complaint = random.choice(COMPLAINTS)[0]
+        problem = random.choice(list(COMPLAINTS.items()))
+        complaint = problem[0]
+        posRes = problem[1][0]
+        negRes = problem[1][1]
     pay_with = random.choice(["cash", "card"])
     cash_given = round(total + random.choice([0, 0, 0, 1, 2, 5, 10]), 2) if pay_with == "cash" else total
     mood = random.choice(["happy", "neutral", "angry"])
@@ -217,6 +224,8 @@ def random_customer(customer_id: int, prices: Dict[str, float], demand: Dict[str
         patience=patience,
         items=items,
         complaint=complaint,
+        posRes=posRes,
+        negRes=negRes,
         expected_total=round(total, 2),
         pay_with=pay_with,
         cash_given=cash_given,
