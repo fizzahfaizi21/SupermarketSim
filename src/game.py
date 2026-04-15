@@ -13,7 +13,6 @@ import json
 from typing import Dict, List, Optional
 
 import pygame
-import google.genai as genai
 
 from config.settings import *
 from src.firebase_service import FirebaseService
@@ -418,12 +417,6 @@ class App:
                     if event.key == pygame.K_1 + ki:
                         self.apply_price_suggestion(ki)
                         break
-                # R=phone(idx 9), T=laptop(idx 10), Y=router(idx 11)
-                EXTRA_PRICE_KEYS = {pygame.K_r: 9, pygame.K_t: 10, pygame.K_y: 11}
-                if event.key in EXTRA_PRICE_KEYS:
-                    idx = EXTRA_PRICE_KEYS[event.key]
-                    if idx < num:
-                        self.apply_price_suggestion(idx)
                 if event.key == pygame.K_a:
                     for idx in range(num):
                         self.apply_price_suggestion(idx, silent=True)
@@ -433,41 +426,27 @@ class App:
                 # Which categories are stockable in this section
                 active_cats   = self._get_active_cats_for_section()
                 all_keys_list = list(PRODUCT_CATALOG.keys())
-                # Keys 1-9 map to product index 0-8
                 for ki in range(min(9, len(all_keys_list))):
                     if event.key == pygame.K_1 + ki:
                         product_key = all_keys_list[ki]
                         prod_cat    = PRODUCT_CATALOG[product_key]["category"]
-                        if self.stock_section == "all" or prod_cat in active_cats:
-                            self.stock_shelf(product_key)
+                        # Match by category (handles secondary products like cake/frz_veg/laptop)
+                        shelf_cat   = next(
+                            (c for c in SHELF_LAYOUT if c == prod_cat),
+                            None
+                        )
+                        if shelf_cat and (self.stock_section == "all" or shelf_cat in active_cats):
+                            cat_idx = list(SHELF_LAYOUT.keys()).index(shelf_cat)
+                            self.stock_shelf(cat_idx)
                         else:
                             section_name = PRODUCT_CATALOG[product_key].get("section", "its section").title()
                             self.toasts.show(f"Go to {section_name} section to stock this item.", WARNING)
                         break
-                # R=phone(idx 9), T=laptop(idx 10), Y=router(idx 11)
-                EXTRA_STOCK_KEYS = {pygame.K_r: "phone", pygame.K_t: "laptop", pygame.K_y: "router"}
-                if event.key in EXTRA_STOCK_KEYS:
-                    product_key = EXTRA_STOCK_KEYS[event.key]
-                    prod_cat    = PRODUCT_CATALOG[product_key]["category"]
-                    if self.stock_section == "all" or prod_cat in active_cats:
-                        self.stock_shelf(product_key)
-                    else:
-                        self.toasts.show("Go to Tech section to stock this item.", WARNING)
 
     def try_interact(self):
         if not self.state:
             return
         player_rect = pygame.Rect(self.player.x - 16, self.player.y - 16, 32, 32)
-
-        # ── customer dialogue ─────────────────────────────────────────────
-        # Check for customers first (any phase) to allow interaction anywhere
-        for customer in self.customers:
-            cx = customer.get("draw_x", customer["x"])
-            cy = customer.get("draw_y", customer["y"])
-            cust_rect = pygame.Rect(cx - 20, cy - 30, 40, 60)
-            if player_rect.colliderect(cust_rect.inflate(60, 60)):
-                self._start_dialogue(customer)
-                return
 
         # ── zone interactions ─────────────────────────────────────────────
         for name, rect in self.zone_rects.items():
@@ -498,8 +477,18 @@ class App:
                 self.open_overlay("stock")
                 return
 
+        # ── customer dialogue ─────────────────────────────────────────────
+        for customer in self.customers:
+            if customer.get("phase") == "queued":
+                cx = customer.get("draw_x", customer["x"])
+                cy = customer.get("draw_y", customer["y"])
+                cust_rect = pygame.Rect(cx - 20, cy - 30, 40, 60)
+                if player_rect.colliderect(cust_rect.inflate(60, 60)):
+                    self._start_dialogue(customer)
+                    return
+
     def _start_dialogue(self, customer: Dict):
-        """Initiate AI dialogue with a customer."""
+        """Initiate AI dialogue with a queued customer."""
         if self.dialogue_loading:
             return
         self.dialogue_customer = customer
@@ -523,31 +512,33 @@ class App:
 
         def fetch():
             try:
-                # Load API key and optional model from environment (same .env as Firebase)
+                # Load API key from environment (same .env as Firebase)
                 from pathlib import Path
                 from dotenv import load_dotenv
                 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-                api_key = os.getenv("GEMINI_API_KEY", "").strip()
-                gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+                api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-                if not api_key:
-                    raise Exception("GEMINI_API_KEY not found")
-                if not gemini_model:
-                    raise Exception("GEMINI_MODEL not configured")
-
-                print("Gemini model:", gemini_model)
-                self.toasts.show(f"Using Gemini model: {gemini_model}", INFO, duration=3.0)
-                client = genai.Client(api_key=api_key)
-                response = client.models.generate_content(
-                    model=gemini_model,
-                    contents=system_prompt + "\n\nSay something to the store manager."
+                payload = json.dumps({
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 80,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": "Say something to the store manager."}],
+                }).encode()
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=payload,
+                    headers={
+                        "Content-Type":    "application/json",
+                        "x-api-key":       api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                    method="POST",
                 )
-                line = response.text.strip().strip('"')
-                self.dialogue_line = line
-            except Exception as e:
-                error_text = f"Gemini error: {e}"
-                print(error_text)
-                self.toasts.show(error_text, DANGER, duration=4.0)
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = json.loads(resp.read())
+                    line = data["content"][0]["text"].strip().strip('"')
+                    self.dialogue_line = line
+            except Exception:
                 moods = {
                     "happy":   "Hi there! Lovely store you have here.",
                     "neutral": "Excuse me, can I get some help?",
@@ -659,8 +650,7 @@ class App:
         self.overlay_anim += (target - self.overlay_anim) * min(1.0, dt * speed)
 
         if self.scene == "game" and self.state:
-            if not self.dialogue_customer:
-                self.update_player(dt)
+            self.update_player(dt)
             self._update_staff_chars(dt)
 
             if not self.overlay:
@@ -673,8 +663,7 @@ class App:
                 if self.state.stress > 80:
                     self.state.satisfaction = max(0, self.state.satisfaction - 1)
 
-                if not self.dialogue_customer:
-                    self.update_customers(dt)
+                self.update_customers(dt)
 
                 # Dynamic customer cap — fewer customers allowed near closing time
                 day_frac_cap = 1.0 - max(0.0, min(1.0,
@@ -981,32 +970,43 @@ class App:
         }
         return mapping.get(self.stock_section, set(SHELF_LAYOUT.keys()))
 
-    def stock_shelf(self, product_key: str):
+    def stock_shelf(self, idx: int):
         if not self.state:
             return
 
-        if product_key not in PRODUCT_CATALOG:
+        categories = list(SHELF_LAYOUT.keys())
+        if idx >= len(categories):
             return
+        category = categories[idx]
         capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
 
-        if self.state.shelves.get(product_key, 0) >= capacity:
-            self.toasts.show(f"{PRODUCT_CATALOG[product_key]['name']} shelf is already full.", WARNING)
+        if self.state.shelves.get(category, 0) >= capacity:
+            self.toasts.show(f"{category.title()} shelf is already full.", WARNING)
             return
 
-        available = self.state.storage.get(product_key, 0)
-        if available <= 0:
-            self.toasts.show(f"No {PRODUCT_CATALOG[product_key]['name']} left in storage.", DANGER)
+        # All products that share this shelf category (e.g. frz_fruit/frz_veg/frz_protein all → frozen)
+        section_products = [k for k, v in PRODUCT_CATALOG.items() if v["category"] == category]
+        if not section_products:
+            section_products = [SHELF_LAYOUT[category]]
+
+        # Stock from whichever product in this category has storage available
+        for product_key in section_products:
+            available = self.state.storage.get(product_key, 0)
+            if available <= 0:
+                continue
+            space = capacity - self.state.shelves.get(category, 0)
+            moved = min(4, available, space)
+            if moved <= 0:
+                continue
+            self.state.storage[product_key]             -= moved
+            self.state.shelves[category]                 = self.state.shelves.get(category, 0) + moved
+            self.state.score                            += moved * 2
+            self.state.satisfaction                      = min(100, self.state.satisfaction + 1)
+            self.toasts.show(f"+ Restocked: {moved}× {PRODUCT_CATALOG[product_key]['name']}", SUCCESS)
             return
 
-        space = capacity - self.state.shelves.get(product_key, 0)
-        moved = min(4, available, space)
-        if moved <= 0:
-            return
-        self.state.storage[product_key]  -= moved
-        self.state.shelves[product_key]   = self.state.shelves.get(product_key, 0) + moved
-        self.state.score                 += moved * 2
-        self.state.satisfaction           = min(100, self.state.satisfaction + 1)
-        self.toasts.show(f"+ Restocked: {moved}× {PRODUCT_CATALOG[product_key]['name']}", SUCCESS)
+        names = ", ".join(PRODUCT_CATALOG[k]["name"] for k in section_products)
+        self.toasts.show(f"No {names} left in storage.", DANGER)
 
     def resolve_complaint(self, good_response: bool):
         if not self.current_customer or not self.current_customer.get("complaint"):
@@ -1029,7 +1029,14 @@ class App:
 
         # Verify shelf stock exists for every item
         for product_key, qty in self.current_customer["items"].items():
-            if self.state.shelves.get(product_key, 0) < qty:
+            cat = PRODUCT_CATALOG[product_key]["category"]
+            # Find which SHELF_LAYOUT category covers this product
+            shelf_cat = next((c for c, pk in SHELF_LAYOUT.items() if pk == product_key or
+                              PRODUCT_CATALOG[product_key]["category"] == c), None)
+            # Fallback: find any shelf category that holds this product type
+            if shelf_cat is None:
+                shelf_cat = cat
+            if self.state.shelves.get(shelf_cat, 0) < qty:
                 self.toasts.show("Shelf stock too low for this sale.", DANGER)
                 return
 
@@ -1047,7 +1054,11 @@ class App:
                 return
 
         for product_key, qty in self.current_customer["items"].items():
-            self.state.shelves[product_key] = max(0, self.state.shelves.get(product_key, 0) - qty)
+            cat = PRODUCT_CATALOG[product_key]["category"]
+            shelf_cat = next((c for c, pk in SHELF_LAYOUT.items()
+                              if PRODUCT_CATALOG[product_key]["category"] == c), cat)
+            if shelf_cat in self.state.shelves:
+                self.state.shelves[shelf_cat] = max(0, self.state.shelves[shelf_cat] - qty)
             self.state.demand[product_key] = min(2.2, self.state.demand.get(product_key, 1.0) + 0.06 * qty)
 
         self.state.money        += total
@@ -1149,8 +1160,9 @@ class App:
             return
         product_key = all_keys[idx]
         current     = self.state.prices[product_key]
-        # Use the product's own shelf stock
-        shelf_stock = self.state.shelves.get(product_key, 0)
+        cat         = PRODUCT_CATALOG[product_key]["category"]
+        # Use the category's shelf stock if it maps to one; else use storage only
+        shelf_stock = self.state.shelves.get(cat, 0)
         stock       = self.state.storage.get(product_key, 0) + shelf_stock
         suggested   = price_suggestion(current, stock, self.state.demand.get(product_key, 1.0))
         self.state.prices[product_key] = suggested
@@ -2706,16 +2718,16 @@ class App:
         SEC_TECH_CX    = ix + int(iw * 0.74)
         capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
 
-        def _section_fill(product_keys):
-            """Average fill ratio across a list of product keys."""
-            vals = [min(1.0, self.state.shelves.get(k, 0) / max(1, capacity))
-                    for k in product_keys]
+        def _section_fill(categories):
+            """Average fill ratio across a list of shelf categories."""
+            vals = [min(1.0, self.state.shelves.get(c, 0) / max(1, capacity))
+                    for c in categories]
             return sum(vals) / max(1, len(vals))
 
-        grocery_fill = _section_fill(["chips", "milk", "bread", "apple"])
-        frozen_fill  = _section_fill(["frz_fruit", "frz_veg", "frz_protein"])
-        deli_fill    = _section_fill(["bread", "donut", "cake"])
-        tech_fill    = _section_fill(["phone", "laptop", "router"])
+        grocery_fill = _section_fill(["snack", "dairy", "produce"])
+        frozen_fill  = _section_fill(["frozen"])
+        deli_fill    = _section_fill(["bakery", "deli"])
+        tech_fill    = _section_fill(["tech"])
 
         draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (60, 120, 60),   fill_ratio=grocery_fill)
         draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (30, 90, 160),   fill_ratio=frozen_fill)
@@ -2930,13 +2942,12 @@ class App:
             draw_text(self.screen, "Press E", (rect.centerx, rect.bottom - 18), size=SMALL_SIZE, color=(78, 88, 118), center=True)
 
         # ── gameplay shelf interaction hints (critical-low flash only — bars now on signs) ──
-        # Map each hitbox to its representative product key for fill display
-        HITBOX_PRODUCT = ["chips", "milk", "bread", "apple", "donut", "frz_fruit", "phone"]
+        labels = list(SHELF_LAYOUT.keys())
         for i, rect in enumerate(self.shelf_hitboxes()):
-            product_key = HITBOX_PRODUCT[i]
-            capacity    = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
-            qty         = self.state.shelves.get(product_key, 0)
-            fill_ratio  = min(1.0, qty / max(1, capacity))
+            category   = labels[i]
+            capacity   = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
+            qty        = self.state.shelves.get(category, 0)
+            fill_ratio = min(1.0, qty / max(1, capacity))
 
             # Critical-low flash only
             if fill_ratio < 0.15:
@@ -3312,7 +3323,7 @@ class App:
 
         # ── instruction line — drawn just above the card grid ───────────
         CONTENT_TOP = panel.y + 80     # clears title (y≈126) + ESC hint + breathing room
-        hint = (f"Section: {section_label}   •   1-9/R/T/Y to restock   •   "
+        hint = (f"Section: {section_label}   •   Press key to restock   •   "
                 f"Grey = go to that section first")
         draw_text(self.screen, hint,
                   (panel.x + 24, CONTENT_TOP - 22), size=SMALL_SIZE, color=TEXT_MUTED)
@@ -3337,9 +3348,10 @@ class App:
             rect = pygame.Rect(rx, ry, card_w, card_h)
 
             cat         = PRODUCT_CATALOG[product_key]["category"]
-            can_stock   = self.stock_section == "all" or cat in active_cats
+            shelf_cat   = next((c for c, pk in SHELF_LAYOUT.items() if pk == product_key), cat)
+            can_stock   = self.stock_section == "all" or shelf_cat in active_cats
             capacity    = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
-            qty         = self.state.shelves.get(product_key, 0)
+            qty         = self.state.shelves.get(shelf_cat, 0)
             storage     = self.state.storage.get(product_key, 0)
             fill_ratio  = min(1.0, qty / max(1, capacity))
             prod_color  = PRODUCT_CATALOG[product_key]["color"]
@@ -3356,8 +3368,7 @@ class App:
             self.screen.set_clip(rect.inflate(-2, -2))
 
             # Key label + product name
-            EXTRA_KEY_LABELS = {9: "R", 10: "T", 11: "Y"}
-            key_lbl  = str(idx + 1) if idx < 9 else EXTRA_KEY_LABELS.get(idx, "–")
+            key_lbl  = str(idx + 1) if idx < 9 else "–"
             txt_col  = TEXT if can_stock else TEXT_MUTED
             pygame.draw.circle(self.screen, prod_color if can_stock else OUTLINE,
                                (rect.x + 12, rect.y + 14), 5)
@@ -3479,7 +3490,7 @@ class App:
 
         # Instruction line pinned just above the cards
         draw_text(self.screen,
-                  "Keys 1–9/R/T/Y apply suggested price   •   A = apply all",
+                  "Keys 1–9 apply suggested price   •   A = apply all",
                   (panel.x + 24, CONTENT_TOP - 22),
                   size=SMALL_SIZE, color=TEXT_MUTED)
 
@@ -3505,7 +3516,8 @@ class App:
             rect = pygame.Rect(rx, ry, card_w, card_h)
 
             current   = self.state.prices.get(product_key, PRODUCT_CATALOG[product_key]["base_price"])
-            shelf_qty = self.state.shelves.get(product_key, 0)
+            cat       = PRODUCT_CATALOG[product_key]["category"]
+            shelf_qty = self.state.shelves.get(cat, 0)
             stock     = self.state.storage.get(product_key, 0) + shelf_qty
             suggested = price_suggestion(current, stock, self.state.demand.get(product_key, 1.0))
             color     = PRODUCT_CATALOG[product_key]["color"]
@@ -3519,8 +3531,7 @@ class App:
 
             # Colour pip + key number + product name
             pygame.draw.circle(self.screen, color, (rect.x + 12, rect.y + 16), 5)
-            EXTRA_KEY_LABELS = {9: "R", 10: "T", 11: "Y"}
-            key_label = str(idx + 1) if idx < 9 else EXTRA_KEY_LABELS.get(idx, "–")
+            key_label = str(idx + 1) if idx < 9 else "–"
             draw_text(self.screen, f"{key_label}. {PRODUCT_CATALOG[product_key]['name']}",
                       (rect.x + 22, rect.y + 9), size=SMALL_SIZE, bold=True)
 
@@ -3563,23 +3574,24 @@ class App:
                       size=BODY_SIZE, color=DANGER, center=True)
             rows = []
 
-        # All x positions are absolute screen coords so header and data
-        # use the exact same number — no offset arithmetic that can drift.
         TABLE_Y  = panel.y + 70
         ROW_H    = 34
         HEADER_H = 30
+        PAD      = 24          # left/right padding inside panel
+        TW       = panel.width - PAD * 2   # usable table width
 
-        # Absolute x centres/anchors for each column
-        X_RANK   = panel.x + 46           # centre of rank column
-        X_PLAYER = panel.x + 180          # left anchor of player name
-        X_SCORE  = panel.x + 560          # centre of score column
-        X_MONEY  = panel.x + 760          # centre of money column
-        X_DAY    = panel.x + 960          # centre of day column
+        # All positions as fractions of TW — they scale with whichever panel calls this
+        # RANK(5%) | PLAYER(32%) | SCORE(20%) | MONEY(22%) | DAY(10%) | right pad
+        X_RANK   = panel.x + PAD + int(TW * 0.025)   # centre
+        X_PLAYER = panel.x + PAD + int(TW * 0.08)    # left anchor
+        X_SCORE  = panel.x + PAD + int(TW * 0.52)    # centre
+        X_MONEY  = panel.x + PAD + int(TW * 0.72)    # centre
+        X_DAY    = panel.x + PAD + int(TW * 0.91)    # centre
 
         medal_colors = [(255, 215, 40), (192, 192, 192), (205, 127, 50)]
 
-        # ── Header ───────────────────────────────────────────────────────
-        hdr = pygame.Rect(panel.x + 24, TABLE_Y, panel.width - 48, HEADER_H)
+        # ── Header bar ────────────────────────────────────────────────────
+        hdr = pygame.Rect(panel.x + PAD, TABLE_Y, TW, HEADER_H)
         pygame.draw.rect(self.screen, PANEL_ALT, hdr, border_radius=8)
         pygame.draw.rect(self.screen, OUTLINE, hdr, 1, border_radius=8)
 
@@ -3597,19 +3609,18 @@ class App:
                       (panel.centerx, TABLE_Y + 100), size=BODY_SIZE, color=TEXT_MUTED, center=True)
             return
 
-        # ── Rows ─────────────────────────────────────────────────────────
+        # ── Rows ──────────────────────────────────────────────────────────
         for i, entry in enumerate(rows[:9], start=1):
             ry = TABLE_Y + HEADER_H + (i - 1) * ROW_H + 2
 
-            # Row background
             if i == 1:
-                bg = pygame.Surface((panel.width - 48, ROW_H - 2), pygame.SRCALPHA)
+                bg = pygame.Surface((TW, ROW_H - 2), pygame.SRCALPHA)
                 pygame.draw.rect(bg, (255, 213, 79, 22), bg.get_rect(), border_radius=6)
-                self.screen.blit(bg, (panel.x + 24, ry))
+                self.screen.blit(bg, (panel.x + PAD, ry))
             elif i % 2 == 0:
-                bg = pygame.Surface((panel.width - 48, ROW_H - 2), pygame.SRCALPHA)
+                bg = pygame.Surface((TW, ROW_H - 2), pygame.SRCALPHA)
                 pygame.draw.rect(bg, (*PANEL_ALT, 80), bg.get_rect(), border_radius=4)
-                self.screen.blit(bg, (panel.x + 24, ry))
+                self.screen.blit(bg, (panel.x + PAD, ry))
 
             row_col = (255, 240, 180) if i == 1 else TEXT
             ty = ry + 9
@@ -3619,21 +3630,31 @@ class App:
             draw_text(self.screen, str(i), (X_RANK, ty),
                       size=SMALL_SIZE, bold=(i <= 3), color=mc, center=True)
 
-            # Data — each uses the same absolute x as its header above
-            username = entry.get("username", "Player")[:22]
-            draw_text(self.screen, username,                  (X_PLAYER, ty), size=SMALL_SIZE, color=row_col)
-            draw_text(self.screen, f"{entry.get('score',0):,}",           (X_SCORE,  ty), size=SMALL_SIZE, color=row_col, center=True)
-            draw_text(self.screen, f"${entry.get('money',0):,.0f}",       (X_MONEY,  ty), size=SMALL_SIZE, color=row_col, center=True)
-            draw_text(self.screen, str(entry.get("day", 1)),              (X_DAY,    ty), size=SMALL_SIZE, color=row_col, center=True)
+            # Truncate username to fit player column (max 18 chars)
+            username = str(entry.get("username", "Player"))[:18]
 
-            # Subtle column dividers
-            for dx in [X_SCORE - 12, X_MONEY - 12, X_DAY - 12]:
+            # Format numbers with compact notation if they'd overflow
+            raw_score = entry.get("score", 0)
+            raw_money = entry.get("money", 0)
+            score_str = f"{raw_score:,}" if raw_score < 1_000_000 else f"{raw_score/1000:.1f}K"
+            money_str = f"${raw_money:,.0f}" if raw_money < 100_000 else f"${raw_money/1000:.1f}K"
+            day_str   = str(entry.get("day", 1))
+
+            draw_text(self.screen, username,  (X_PLAYER, ty), size=SMALL_SIZE, color=row_col)
+            draw_text(self.screen, score_str, (X_SCORE,  ty), size=SMALL_SIZE, color=row_col, center=True)
+            draw_text(self.screen, money_str, (X_MONEY,  ty), size=SMALL_SIZE, color=row_col, center=True)
+            draw_text(self.screen, day_str,   (X_DAY,    ty), size=SMALL_SIZE, color=row_col, center=True)
+
+            # Column dividers
+            for dx in [X_SCORE - int(TW * 0.10),
+                       X_MONEY - int(TW * 0.10),
+                       X_DAY   - int(TW * 0.09)]:
                 pygame.draw.line(self.screen, OUTLINE, (dx, ry), (dx, ry + ROW_H - 3), 1)
 
             # Row separator
             pygame.draw.line(self.screen, OUTLINE,
-                             (panel.x + 28,           ry + ROW_H - 3),
-                             (panel.x + panel.width - 28, ry + ROW_H - 3), 1)
+                             (panel.x + PAD + 4,       ry + ROW_H - 3),
+                             (panel.x + panel.width - PAD - 4, ry + ROW_H - 3), 1)
 
     def draw_report_overlay(self, panel: pygame.Rect):
         report = self.report_cache or (self.state.reports[-1] if self.state.reports else None)
