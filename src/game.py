@@ -3414,10 +3414,11 @@ class App:
         draw_text(self.screen, f"Total: ${self.current_customer['expected_total']:.2f}", (left.x + 22, left.bottom - 72), size=TITLE_SIZE, bold=True)
 
         if self.current_customer.get("complaint"):
-            draw_text(self.screen, "Complaint", (right.x + 24, right.y + 24), size=TITLE_SIZE, bold=True)
-            draw_text(self.screen, self.current_customer["complaint"], (right.x + 24, right.y + 76), size=BODY_SIZE, color=TEXT_MUTED)
-            draw_text(self.screen, "1. Good response", (right.x + 24, right.y + 142), size=BODY_SIZE, color=SUCCESS)
-            draw_text(self.screen, "2. Poor response", (right.x + 24, right.y + 178), size=BODY_SIZE, color=DANGER)
+            #draw_text(self.screen, "Complaint", (right.x + 24, right.y + 24), size=TITLE_SIZE, bold=True)
+            #draw_text(self.screen, self.current_customer["complaint"], (right.x + 24, right.y + 76), size=BODY_SIZE, color=TEXT_MUTED)
+            #draw_text(self.screen, "1. Good response", (right.x + 24, right.y + 142), size=BODY_SIZE, color=SUCCESS)
+            #draw_text(self.screen, "2. Poor response", (right.x + 24, right.y + 178), size=BODY_SIZE, color=DANGER)
+            ...
 
         pay_y = right.y + 280
         if self.current_customer["pay_with"] == "cash":
