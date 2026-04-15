@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import sys
+import threading
 import time
+import urllib.request
+import json
 from typing import Dict, List, Optional
 
 import pygame
@@ -15,8 +19,11 @@ from src.firebase_service import FirebaseService
 from src.models import (
     PRODUCT_CATALOG,
     SHELF_LAYOUT,
+    SECTION_PRODUCTS,
     STAFF_POOL,
     UPGRADES,
+    AI_DIALOGUE_SYSTEM,
+    CUSTOMER_ARCHETYPES,
     GameState,
     ShiftReport,
     generate_review,
@@ -56,9 +63,10 @@ class App:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption(TITLE)
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.running = True
+        self._fullscreen = False
 
         self.firebase = FirebaseService()
         self.toasts = ToastManager()
@@ -91,8 +99,17 @@ class App:
         self.checkout_change_input = ""
         self.report_cache = None
         self.selected_shelf = 0
+        self.selected_section = 0   # which section hitbox index was hit
+        self.stock_section    = "all"  # "grocery"|"frozen"|"tech"|"deli"|"all" (zone Stock = all)
         self.overlay_anim = 0.0
         self.zone_rects = self._build_zones()
+
+        # AI dialogue system
+        self.dialogue_customer: Optional[Dict] = None   # customer being spoken to
+        self.dialogue_line: str = ""                    # fetched line from AI
+        self.dialogue_loading: bool = False             # spinner while fetching
+        self.dialogue_response_pending: bool = False    # awaiting 1/2 key press
+        self._dialogue_thread: Optional[threading.Thread] = None
 
         self.settings = {
             "music": 80,
@@ -130,12 +147,21 @@ class App:
         ]
 
     def _build_zones(self):
+        # All zones are positioned BELOW the shelf sections and away from each other.
+        # Store floor: y=74..HEIGHT-36. Shelf content: y=156..~580.
+        # Zones sit in the bottom strip (y ~610-730) or top-right corners clear of shelves.
+        #
+        # Break:    bottom-left  — clear of grocery (grocery cx ≈ 166)
+        # Stock:    left side, mid-bottom
+        # Prices:   top centre   — above deli section, narrow band
+        # Checkout: bottom-right
+        # Manager:  top-right    — above tech section
         return {
-            "stock": pygame.Rect(90, 545, 185, 180),
-            "checkout": pygame.Rect(1075, 535, 230, 180),
-            "manager": pygame.Rect(1175, 135, 180, 120),
-            "prices": pygame.Rect(590, 100, 255, 92),
-            "break": pygame.Rect(85, 110, 180, 102),
+            "break":    pygame.Rect(40,  620, 160, 90),          # bottom-left, below grocery
+            "stock":    pygame.Rect(40,  490, 160, 110),         # mid-left
+            "prices":   pygame.Rect(580, 126, 140, 68),          # Frozen↔Deli corridor, centred at x=602
+            "checkout": pygame.Rect(WIDTH - 260, 590, 220, 110), # bottom-right
+            "manager":  pygame.Rect(WIDTH - 220, 80,  190, 90),  # top-right, above tech
         }
 
     # ---------- state helpers ----------
@@ -152,6 +178,11 @@ class App:
         self.current_customer = None
         self.checkout_change_input = ""
         self.report_cache = None
+        self.dialogue_customer = None
+        self.dialogue_line = ""
+        self.dialogue_loading = False
+        self.dialogue_response_pending = False
+        self.stock_section = "all"
 
     def sync_display_values(self):
         if not self.state:
@@ -283,6 +314,15 @@ class App:
                 self.running = False
                 return
 
+            # F11 — toggle fullscreen on any scene
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_F11:
+                self._fullscreen = not self._fullscreen
+                if self._fullscreen:
+                    self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+                else:
+                    self.screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
+                return
+
             if self.scene == "auth":
                 for inp in self.auth_inputs.values():
                     inp.handle_event(event)
@@ -318,14 +358,29 @@ class App:
 
     def handle_game_event(self, event):
         if event.type == pygame.KEYDOWN:
+            # ── dialogue response ───────────────────────────────────────────
+            if self.dialogue_response_pending and self.dialogue_customer:
+                if event.key == pygame.K_1:
+                    self._resolve_dialogue(good=True)
+                    return
+                elif event.key == pygame.K_2:
+                    self._resolve_dialogue(good=False)
+                    return
+
             if event.key == pygame.K_ESCAPE:
-                if self.overlay:
+                if self.dialogue_customer:
+                    self.dialogue_customer = None
+                    self.dialogue_line = ""
+                    self.dialogue_response_pending = False
+                elif self.overlay:
                     self.close_overlay()
                 else:
                     self.save_current_game()
                     self.set_scene("menu")
-            elif event.key == pygame.K_e and not self.overlay:
+
+            elif event.key == pygame.K_e and not self.overlay and not self.dialogue_customer:
                 self.try_interact()
+
             elif self.overlay == "checkout":
                 if event.key == pygame.K_BACKSPACE:
                     self.checkout_change_input = self.checkout_change_input[:-1]
@@ -340,8 +395,7 @@ class App:
 
             elif self.overlay == "manager":
                 if pygame.K_1 <= event.key <= pygame.K_5:
-                    idx = event.key - pygame.K_1
-                    self.hire_candidate(idx)
+                    self.hire_candidate(event.key - pygame.K_1)
                 elif event.key == pygame.K_h:
                     self.fire_last_staff()
                 elif event.key == pygame.K_p:
@@ -356,36 +410,173 @@ class App:
                     self.run_social_promo()
 
             elif self.overlay == "prices":
-                if pygame.K_1 <= event.key <= pygame.K_4:
-                    idx = event.key - pygame.K_1
-                    self.apply_price_suggestion(idx)
-                elif event.key == pygame.K_a:
-                    for idx in range(4):
+                all_keys = list(PRODUCT_CATALOG.keys())
+                num = len(all_keys)
+                # Keys 1-9 apply suggestion for that product index
+                for ki in range(min(9, num)):
+                    if event.key == pygame.K_1 + ki:
+                        self.apply_price_suggestion(ki)
+                        break
+                # R=phone(idx 9), T=laptop(idx 10), Y=router(idx 11)
+                EXTRA_PRICE_KEYS = {pygame.K_r: 9, pygame.K_t: 10, pygame.K_y: 11}
+                if event.key in EXTRA_PRICE_KEYS:
+                    idx = EXTRA_PRICE_KEYS[event.key]
+                    if idx < num:
+                        self.apply_price_suggestion(idx)
+                if event.key == pygame.K_a:
+                    for idx in range(num):
                         self.apply_price_suggestion(idx, silent=True)
                     self.toasts.show("Applied all suggested prices.", SUCCESS)
 
             elif self.overlay == "stock":
-                if pygame.K_1 <= event.key <= pygame.K_4:
-                    self.stock_shelf(event.key - pygame.K_1)
+                # Which categories are stockable in this section
+                active_cats   = self._get_active_cats_for_section()
+                all_keys_list = list(PRODUCT_CATALOG.keys())
+                # Keys 1-9 map to product index 0-8
+                for ki in range(min(9, len(all_keys_list))):
+                    if event.key == pygame.K_1 + ki:
+                        product_key = all_keys_list[ki]
+                        prod_cat    = PRODUCT_CATALOG[product_key]["category"]
+                        if self.stock_section == "all" or prod_cat in active_cats:
+                            self.stock_shelf(product_key)
+                        else:
+                            section_name = PRODUCT_CATALOG[product_key].get("section", "its section").title()
+                            self.toasts.show(f"Go to {section_name} section to stock this item.", WARNING)
+                        break
+                # R=phone(idx 9), T=laptop(idx 10), Y=router(idx 11)
+                EXTRA_STOCK_KEYS = {pygame.K_r: "phone", pygame.K_t: "laptop", pygame.K_y: "router"}
+                if event.key in EXTRA_STOCK_KEYS:
+                    product_key = EXTRA_STOCK_KEYS[event.key]
+                    prod_cat    = PRODUCT_CATALOG[product_key]["category"]
+                    if self.stock_section == "all" or prod_cat in active_cats:
+                        self.stock_shelf(product_key)
+                    else:
+                        self.toasts.show("Go to Tech section to stock this item.", WARNING)
 
     def try_interact(self):
         if not self.state:
             return
         player_rect = pygame.Rect(self.player.x - 16, self.player.y - 16, 32, 32)
 
+        # ── zone interactions ─────────────────────────────────────────────
         for name, rect in self.zone_rects.items():
             if player_rect.colliderect(rect.inflate(46, 46)):
                 if name == "break":
                     self.take_break()
                     return
+                if name == "stock":
+                    self.stock_section = "all"   # Stock zone = manage all storage
                 self.open_overlay(name)
                 return
 
+        # ── shelf / section interactions ──────────────────────────────────
+        # Maps hitbox index → which section products can be stocked here
+        HITBOX_SECTION = {
+            0: "grocery",   # snack
+            1: "grocery",   # dairy
+            2: "deli",      # bakery
+            3: "grocery",   # produce
+            4: "deli",      # deli
+            5: "frozen",    # frozen
+            6: "tech",      # tech
+        }
         for i, rect in enumerate(self.shelf_hitboxes()):
-            if player_rect.colliderect(rect.inflate(34, 34)):
+            if player_rect.colliderect(rect.inflate(40, 40)):
+                self.selected_section = i
+                self.stock_section    = HITBOX_SECTION.get(i, "all")
                 self.open_overlay("stock")
-                self.selected_shelf = i
                 return
+
+        # ── customer dialogue ─────────────────────────────────────────────
+        for customer in self.customers:
+            if customer.get("phase") == "queued":
+                cx = customer.get("draw_x", customer["x"])
+                cy = customer.get("draw_y", customer["y"])
+                cust_rect = pygame.Rect(cx - 20, cy - 30, 40, 60)
+                if player_rect.colliderect(cust_rect.inflate(60, 60)):
+                    self._start_dialogue(customer)
+                    return
+
+    def _start_dialogue(self, customer: Dict):
+        """Initiate AI dialogue with a queued customer."""
+        if self.dialogue_loading:
+            return
+        self.dialogue_customer = customer
+        self.dialogue_line = ""
+        self.dialogue_loading = True
+        self.dialogue_response_pending = False
+
+        mood    = customer.get("mood", "neutral")
+        section = customer.get("section", "grocery")
+        items   = customer.get("items", {})
+        item_names = ", ".join(
+            f"{PRODUCT_CATALOG.get(k, {}).get('name', k)} x{v}" for k, v in items.items()
+        )
+
+        system_prompt = (
+            f"You are a {mood} customer shopping in the {section} section. "
+            f"Your cart contains: {item_names}. "
+            "Respond with ONE short sentence of natural in-character dialogue (max 18 words). "
+            "No quotation marks, no stage directions, no emojis."
+        )
+
+        def fetch():
+            try:
+                # Load API key from environment (same .env as Firebase)
+                from pathlib import Path
+                from dotenv import load_dotenv
+                load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+                api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+                payload = json.dumps({
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 80,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": "Say something to the store manager."}],
+                }).encode()
+                req = urllib.request.Request(
+                    "https://api.anthropic.com/v1/messages",
+                    data=payload,
+                    headers={
+                        "Content-Type":    "application/json",
+                        "x-api-key":       api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = json.loads(resp.read())
+                    line = data["content"][0]["text"].strip().strip('"')
+                    self.dialogue_line = line
+            except Exception:
+                moods = {
+                    "happy":   "Hi there! Lovely store you have here.",
+                    "neutral": "Excuse me, can I get some help?",
+                    "angry":   "Finally, someone! Where's the manager?",
+                }
+                self.dialogue_line = moods.get(mood, "Hello there.")
+            finally:
+                self.dialogue_loading = False
+                self.dialogue_response_pending = True
+
+        self._dialogue_thread = threading.Thread(target=fetch, daemon=True)
+        self._dialogue_thread.start()
+
+    def _resolve_dialogue(self, good: bool):
+        """Apply effects of the player's dialogue response."""
+        if not self.state or not self.dialogue_customer:
+            return
+        if good:
+            self.state.satisfaction = min(100, self.state.satisfaction + 5)
+            self.state.score += 20
+            self.toasts.show("Great response! Reputation up.", SUCCESS)
+        else:
+            self.state.satisfaction = max(0, self.state.satisfaction - 6)
+            self.state.score = max(0, self.state.score - 8)
+            self.toasts.show("Poor response. Reputation dipped.", DANGER)
+        self.dialogue_customer = None
+        self.dialogue_line = ""
+        self.dialogue_response_pending = False
 
     def update(self, dt: float):
         self.fader.update(dt)
@@ -396,10 +587,14 @@ class App:
             self.auth_time += dt
             # drift particles upward and respawn
             for p in self.pixel_particles:
-                p[1] -= p[4] * dt        # y  (speed)
-                p[5] += dt               # age
+                p[1] -= p[4] * dt
+                p[5] += dt
                 if p[1] < -8 or p[5] > p[6]:
                     self._respawn_particle(p)
+
+        # auth_time also drives game-scene animations (staff walk cycles, shimmer, etc.)
+        if self.scene == "game":
+            self.auth_time += dt
 
         if self.scene in ("auth", "menu"):
             # update preview characters with smooth walk cycles
@@ -466,6 +661,7 @@ class App:
 
         if self.scene == "game" and self.state:
             self.update_player(dt)
+            self._update_staff_chars(dt)
 
             if not self.overlay:
                 self.day_timer -= dt
@@ -479,17 +675,108 @@ class App:
 
                 self.update_customers(dt)
 
-                if self.spawn_timer <= 0 and len(self.customers) < MAX_CUSTOMERS:
+                # Dynamic customer cap — fewer customers allowed near closing time
+                day_frac_cap = 1.0 - max(0.0, min(1.0,
+                    self.day_timer / max(1, DAY_LENGTH_SECONDS)))
+                import math as _math2
+                effective_max = max(2, int(MAX_CUSTOMERS * (
+                    0.40 + 0.60 * _math2.sin(_math2.pi * day_frac_cap))))
+
+                if self.spawn_timer <= 0 and len(self.customers) < effective_max:
                     self.spawn_customer()
+
+                    # ── day/night traffic curve ───────────────────────────
+                    # day_frac: 0.0=dawn, 0.5=midday peak, 1.0=closing night
+                    day_frac = 1.0 - max(0.0, min(1.0,
+                        self.day_timer / max(1, DAY_LENGTH_SECONDS)))
+
+                    # Bell curve peaks at midday (frac=0.5), quiet at dawn/dusk.
+                    # traffic_mul: 0.4 (night/dawn) → 1.0 (midday peak)
+                    # Uses a sine arch: sin(frac * π) gives 0 at 0&1, 1 at 0.5
+                    import math as _math
+                    traffic_mul = 0.40 + 0.60 * _math.sin(_math.pi * day_frac)
+
+                    # Base interval: shorter = more frequent spawns
                     base = random.uniform(CUSTOMER_SPAWN_MIN, CUSTOMER_SPAWN_MAX)
+
+                    # Divide base interval by traffic_mul:
+                    #   midday (mul=1.0) → normal rate
+                    #   dawn/night (mul=0.4) → interval 2.5× longer = fewer customers
+                    interval = base / max(0.1, traffic_mul)
+
+                    # Promo boost halves the interval on top of traffic curve
                     if time.time() < self.state.popularity_boost_until:
-                        base *= 0.65
-                    self.spawn_timer = max(3.2, base)
+                        interval *= 0.65
+
+                    # Hard floor so customers never spam faster than 3s even at peak
+                    self.spawn_timer = max(3.0, interval)
 
                 if self.day_timer <= 0:
                     self.end_day()
 
             self.sync_display_values()
+
+    def _update_staff_chars(self, dt: float):
+        """Animate hired staff on the game floor — patrol aisles, idle sway, task pauses."""
+        if not self.state:
+            return
+
+        # Game floor bounds (must match draw_store_map geometry)
+        floor_y_top    = 74 + 52 + 40    # CONTENT_Y + a little padding
+        floor_y_bottom = HEIGHT - 110 - 50  # floor.bottom - margin
+
+        # Per-staff patrol config: (y_min, y_max, patrol_speed, idle_sway_amp)
+        # EMP patrols grocery/frozen corridor; TRN patrols deli/frozen; CSH stays near register
+        patrol_cfg = [
+            (floor_y_top, floor_y_bottom,       62,  3.0),   # EMP — full aisle patrol
+            (floor_y_top, floor_y_bottom - 80,  48,  2.5),   # TRN — slightly shorter range
+            (floor_y_bottom - 90, floor_y_bottom, 8,  5.0),  # CSH — register idle sway only
+        ]
+
+        staff_hired = len(self.state.staff)
+
+        for idx, ch in enumerate(self._preview_chars):
+            if staff_hired < (idx + 1):
+                continue   # not hired yet, skip
+
+            cfg = patrol_cfg[idx % len(patrol_cfg)]
+            y_min, y_max, speed, sway_amp = cfg
+
+            # Always tick walk_phase for animation even while paused/idle
+            ch["walk_phase"] += dt * 8.0
+
+            # Initialise y position on first game frame
+            if ch["y"] == 0.0:
+                ch["y"] = float(y_min + (y_max - y_min) * ch["y_frac"])
+                ch["vy"] = 1.0 if idx % 2 == 0 else -1.0
+
+            if ch["pause_t"] > 0:
+                # ── IDLE / TASK pause ─────────────────────────────────────
+                # Gentle idle bob: tiny y oscillation so they never look frozen
+                ch["y"] += math.sin(ch["walk_phase"] * 0.4) * sway_amp * dt
+                ch["y"]  = max(y_min, min(y_max, ch["y"]))
+                ch["pause_t"] -= dt
+            else:
+                # ── PATROL ────────────────────────────────────────────────
+                if ch["vy"] == 0.0:
+                    ch["vy"] = 1.0
+
+                ch["y"] += ch["vy"] * speed * dt
+
+                # Bounce at patrol bounds with a randomised pause (simulates stopping to work)
+                if ch["y"] >= y_max:
+                    ch["y"]       = float(y_max)
+                    ch["vy"]      = -abs(ch["vy"])
+                    ch["pause_t"] = random.uniform(0.8, 2.2)   # longer pause = "doing a task"
+                elif ch["y"] <= y_min:
+                    ch["y"]       = float(y_min)
+                    ch["vy"]      = abs(ch["vy"])
+                    ch["pause_t"] = random.uniform(0.6, 1.8)
+
+                # Occasional spontaneous direction flip (looks like noticing something)
+                if random.random() < 0.004:
+                    ch["vy"]     *= -1
+                    ch["pause_t"] = random.uniform(0.3, 0.9)
 
     def update_player(self, dt: float):
         keys = pygame.key.get_pressed()
@@ -517,14 +804,74 @@ class App:
 
     def update_customers(self, dt: float):
         updated = []
+        WALK_SPEED = 90.0  # px/s
+
         for customer in self.customers:
-            customer["patience"] -= 10 * dt
+            # Patience only counts down while waiting at the checkout counter
+            if customer.get("phase") == "queued":
+                customer["patience"] -= 10 * dt
             customer["alpha"] = min(255, customer.get("alpha", 0) + int(255 * dt * CUSTOMER_FADE_SPEED))
-            customer["x"] = min(customer["target_x"], customer.get("x", customer["target_x"] - 60) + 120 * dt)
+            customer["walk_phase"] = customer.get("walk_phase", 0.0) + dt * 8.0
 
             if customer["patience"] <= 0:
                 self.state.satisfaction = max(0, self.state.satisfaction - 7)
                 continue
+
+            phase = customer.get("phase", "queued")
+            dx_pos = customer.get("draw_x", customer["x"])
+            dy_pos = customer.get("draw_y", customer["y"])
+
+            if phase == "enter":
+                # Walk from entrance upward to aisle corridor x
+                ax = customer["aisle_x"]
+                # first move x toward aisle, then walk up
+                if abs(dx_pos - ax) > 8:
+                    dx_pos += math.copysign(WALK_SPEED * dt, ax - dx_pos)
+                    customer["vy"] = 0
+                else:
+                    dx_pos = ax
+                    dy_pos -= WALK_SPEED * dt
+                    customer["vy"] = -1
+                customer["draw_x"] = dx_pos
+                customer["draw_y"] = dy_pos
+                if dy_pos <= customer["aisle_top_y"]:
+                    customer["phase"] = "browse"
+                    customer["browse_timer"] = random.uniform(1.5, 3.5)
+
+            elif phase == "browse":
+                # Wander slightly in the aisle for browse_timer seconds
+                customer["browse_timer"] = customer.get("browse_timer", 1.0) - dt
+                # gentle side sway
+                dx_pos += math.sin(customer["walk_phase"] * 0.5) * 12 * dt
+                customer["draw_x"] = dx_pos
+                if customer["browse_timer"] <= 0:
+                    customer["phase"] = "head_to_checkout"
+                    customer["vy"] = 1
+
+            elif phase == "head_to_checkout":
+                # Move toward checkout queue position at constant speed
+                tx = customer["queue_x"]
+                ty = customer["queue_y"]
+                dist_x = tx - dx_pos
+                dist_y = ty - dy_pos
+                dist = math.sqrt(dist_x ** 2 + dist_y ** 2)
+                if dist > 8:
+                    step = WALK_SPEED * dt
+                    dx_pos += dist_x / dist * step
+                    dy_pos += dist_y / dist * step
+                    customer["vy"] = 1 if dist_y > 0 else -1
+                else:
+                    dx_pos = tx
+                    dy_pos = ty
+                    customer["phase"] = "queued"
+                customer["draw_x"] = dx_pos
+                customer["draw_y"] = dy_pos
+
+            else:  # queued — stay in queue position
+                customer["draw_x"] = customer["queue_x"]
+                customer["draw_y"] = customer["queue_y"]
+                customer["vy"] = 0
+
             updated.append(customer)
 
         self.customers = updated
@@ -538,58 +885,127 @@ class App:
         customer_obj = random_customer(self.next_customer_id, self.state.prices, self.state.demand)
         self.next_customer_id += 1
 
+        # Queue position at checkout (right side)
         row = len(self.customers)
-        target_x = 1080 + (row % 2) * 72
-        target_y = 510 - row * 62
+        queue_x = WIDTH - 210 + (row % 2) * 52
+        queue_y = HEIGHT - 180 - row * 58
+
+        # Customer enters from bottom-center (entrance mat) and walks to an aisle, then checkout
+        floor = pygame.Rect(28, 74, WIDTH - 56, HEIGHT - 110)
+        floor_y = floor.y + 52
+        entrance_x = floor.centerx + random.randint(-60, 60)
+        entrance_y = floor.bottom - 30
+
+        # Pick a random aisle corridor x (between sections)
+        corridor_fracs = [0.20, 0.42, 0.62]
+        chosen_frac = random.choice(corridor_fracs)
+        aisle_x = floor.x + int(floor.width * chosen_frac)
+        aisle_top_y = floor_y + 50
 
         payload = {
             "id": customer_obj.id,
             "mood": customer_obj.mood,
             "patience": customer_obj.patience,
             "items": customer_obj.items,
+            "section": customer_obj.section,
             "complaint": customer_obj.complaint,
             "expected_total": customer_obj.expected_total,
             "pay_with": customer_obj.pay_with,
             "cash_given": customer_obj.cash_given,
             "alpha": 0,
-            "x": target_x - 70,
-            "target_x": target_x,
-            "y": target_y,
+            # walk path state
+            "phase": "enter",
+            "draw_x": float(entrance_x),
+            "draw_y": float(entrance_y),
+            "aisle_x": float(aisle_x),
+            "aisle_top_y": float(aisle_top_y),
+            "queue_x": float(queue_x),
+            "queue_y": float(queue_y),
+            "walk_phase": random.uniform(0, 6.28),
+            "vy": 1.0,
+            "x": queue_x,
+            "y": queue_y,
+            "target_x": queue_x,
         }
         self.customers.append(payload)
 
     def shelf_hitboxes(self):
+        """
+        Returns 7 interaction rects — one per SHELF_LAYOUT category.
+        Positions match draw_store_map geometry:
+          floor = Rect(28, 74, WIDTH-56, HEIGHT-110)
+          floor_y = 74 + 52 = 126  (below windows)
+          CONTENT_Y = 126 + 30 = 156
+
+        Sections:
+          [0] snack/chips   → SEC_GROCERY_CX  = floor.x + floor.w*0.10
+          [1] dairy/milk    → SEC_GROCERY_CX  (same unit, second column implicit)
+          [2] bakery/bread  → SEC_DELI_CX     = floor.x + floor.w*0.53
+          [3] produce/apple → SEC_GROCERY_CX  (grocery shelf, right side)
+          [4] deli          → SEC_DELI_CX
+          [5] frozen        → SEC_FROZEN_CX   = floor.x + floor.w*0.30
+          [6] tech          → SEC_TECH_CX     = floor.x + floor.w*0.74
+        """
+        fx  = 28
+        fw  = WIDTH - 56
+        fy  = 74 + 52 + 30   # CONTENT_Y
+
+        grocery_cx = fx + int(fw * 0.10)
+        frozen_cx  = fx + int(fw * 0.30)
+        deli_cx    = fx + int(fw * 0.53)
+        tech_cx    = fx + int(fw * 0.74)
+
+        hw = 100   # hitbox width
+        hh = 120   # hitbox height
+
         return [
-            pygame.Rect(390, 250, 180, 122),
-            pygame.Rect(635, 250, 180, 122),
-            pygame.Rect(880, 250, 180, 122),
-            pygame.Rect(1125, 250, 180, 122),
+            pygame.Rect(grocery_cx - hw//2,      fy, hw, hh),   # 0 snack
+            pygame.Rect(grocery_cx - hw//2 + 60, fy, hw, hh),   # 1 dairy
+            pygame.Rect(deli_cx - hw//2,         fy, hw, hh),   # 2 bakery
+            pygame.Rect(grocery_cx + hw//2 - 20, fy, hw, hh),   # 3 produce
+            pygame.Rect(deli_cx - hw//2 + 10,    fy + 80, hw, hh),  # 4 deli
+            pygame.Rect(frozen_cx - 85,          fy, 170, hh),  # 5 frozen (3 fridges)
+            pygame.Rect(tech_cx - 120,           fy, 240, hh),  # 6 tech (3 aisles)
         ]
 
     # ---------- gameplay actions ----------
-    def stock_shelf(self, idx: int):
+    def _get_active_cats_for_section(self) -> set:
+        """Return the shelf categories the player can stock in the current section."""
+        mapping = {
+            "grocery": {"snack", "dairy", "produce"},
+            "deli":    {"bakery", "deli"},
+            "frozen":  {"frozen"},
+            "tech":    {"tech"},
+            "all":     set(SHELF_LAYOUT.keys()),
+        }
+        return mapping.get(self.stock_section, set(SHELF_LAYOUT.keys()))
+
+    def stock_shelf(self, product_key: str):
         if not self.state:
             return
 
-        categories = list(SHELF_LAYOUT.keys())
-        category = categories[idx]
-        product_key = SHELF_LAYOUT[category]
+        if product_key not in PRODUCT_CATALOG:
+            return
         capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
 
-        if self.state.shelves[category] >= capacity:
-            self.toasts.show(f"{category.title()} shelf is already full.", WARNING)
+        if self.state.shelves.get(product_key, 0) >= capacity:
+            self.toasts.show(f"{PRODUCT_CATALOG[product_key]['name']} shelf is already full.", WARNING)
             return
 
-        if self.state.storage[product_key] <= 0:
+        available = self.state.storage.get(product_key, 0)
+        if available <= 0:
             self.toasts.show(f"No {PRODUCT_CATALOG[product_key]['name']} left in storage.", DANGER)
             return
 
-        moved = min(4, self.state.storage[product_key], capacity - self.state.shelves[category])
-        self.state.storage[product_key] -= moved
-        self.state.shelves[category] += moved
-        self.state.score += moved * 2
-        self.state.satisfaction = min(100, self.state.satisfaction + 1)
-        self.toasts.show(f"+ Shelf Restocked: {moved} {PRODUCT_CATALOG[product_key]['name']}", SUCCESS)
+        space = capacity - self.state.shelves.get(product_key, 0)
+        moved = min(4, available, space)
+        if moved <= 0:
+            return
+        self.state.storage[product_key]  -= moved
+        self.state.shelves[product_key]   = self.state.shelves.get(product_key, 0) + moved
+        self.state.score                 += moved * 2
+        self.state.satisfaction           = min(100, self.state.satisfaction + 1)
+        self.toasts.show(f"+ Restocked: {moved}× {PRODUCT_CATALOG[product_key]['name']}", SUCCESS)
 
     def resolve_complaint(self, good_response: bool):
         if not self.current_customer or not self.current_customer.get("complaint"):
@@ -609,9 +1025,10 @@ class App:
             return
 
         total = self.current_customer["expected_total"]
+
+        # Verify shelf stock exists for every item
         for product_key, qty in self.current_customer["items"].items():
-            category = PRODUCT_CATALOG[product_key]["category"]
-            if self.state.shelves[category] < qty:
+            if self.state.shelves.get(product_key, 0) < qty:
                 self.toasts.show("Shelf stock too low for this sale.", DANGER)
                 return
 
@@ -621,7 +1038,6 @@ class App:
             except ValueError:
                 self.toasts.show("Enter a valid change amount.", DANGER)
                 return
-
             expected_change = round(self.current_customer["cash_given"] - total, 2)
             if abs(entered - expected_change) > 0.01:
                 self.state.satisfaction = max(0, self.state.satisfaction - 10)
@@ -630,23 +1046,21 @@ class App:
                 return
 
         for product_key, qty in self.current_customer["items"].items():
-            category = PRODUCT_CATALOG[product_key]["category"]
-            self.state.shelves[category] -= qty
-            self.state.demand[product_key] = min(2.2, self.state.demand[product_key] + 0.06 * qty)
+            self.state.shelves[product_key] = max(0, self.state.shelves.get(product_key, 0) - qty)
+            self.state.demand[product_key] = min(2.2, self.state.demand.get(product_key, 1.0) + 0.06 * qty)
 
-        self.state.money += total
-        self.state.sales_today += total
+        self.state.money        += total
+        self.state.sales_today  += total
         self.state.customers_served += 1
-        self.state.score += int(total * 4)
-        self.state.satisfaction = min(100, self.state.satisfaction + 2)
+        self.state.score        += int(total * 4)
+        self.state.satisfaction  = min(100, self.state.satisfaction + 2)
 
         transaction = {
-            "total_amount": round(total, 2),
+            "total_amount":     round(total, 2),
             "transaction_time": time.time(),
-            "items": self.current_customer["items"],
-            "pay_with": self.current_customer["pay_with"],
+            "items":            self.current_customer["items"],
+            "pay_with":         self.current_customer["pay_with"],
         }
-
         try:
             self.firebase.add_transaction(self.state.uid, self.session.id_token, transaction)
         except Exception:
@@ -655,8 +1069,7 @@ class App:
         self.customers = [c for c in self.customers if c["id"] != self.current_customer["id"]]
         self.current_customer = self.customers[0] if self.customers else None
         self.checkout_change_input = ""
-        self.toasts.show(f"+ ${total:.2f} Sale", SUCCESS)
-
+        self.toasts.show(f"+ ${total:.2f} Sale complete!", SUCCESS)
         if self.current_customer is None:
             self.close_overlay()
 
@@ -730,18 +1143,22 @@ class App:
     def apply_price_suggestion(self, idx: int, silent=False):
         if not self.state:
             return
-
-        product_key = list(PRODUCT_CATALOG.keys())[idx]
-        current = self.state.prices[product_key]
-        stock = self.state.storage[product_key] + self.state.shelves[PRODUCT_CATALOG[product_key]["category"]]
-        suggested = price_suggestion(current, stock, self.state.demand[product_key])
+        all_keys = list(PRODUCT_CATALOG.keys())
+        if idx >= len(all_keys):
+            return
+        product_key = all_keys[idx]
+        current     = self.state.prices[product_key]
+        # Use the product's own shelf stock
+        shelf_stock = self.state.shelves.get(product_key, 0)
+        stock       = self.state.storage.get(product_key, 0) + shelf_stock
+        suggested   = price_suggestion(current, stock, self.state.demand.get(product_key, 1.0))
         self.state.prices[product_key] = suggested
-
         if suggested > PRODUCT_CATALOG[product_key]["base_price"] * 1.7:
             self.state.satisfaction = max(0, self.state.satisfaction - 5)
-
         if not silent:
-            self.toasts.show(f"Price updated: {PRODUCT_CATALOG[product_key]['name']} → ${suggested:.2f}", SUCCESS)
+            self.toasts.show(
+                f"Price updated: {PRODUCT_CATALOG[product_key]['name']} → ${suggested:.2f}", SUCCESS
+            )
 
     def take_break(self):
         if not self.state:
@@ -843,59 +1260,28 @@ class App:
         p[6] = random.uniform(2.0, 5.5)
 
     def _init_preview_chars(self):
-        """Characters walk up and down the aisle corridors between shelf sections.
-        Corridor centres (approximate fractions of inset width):
-          Left wall → Grocery (0.09) → corridor ~0.19 → Frozen (0.29) →
-          corridor ~0.41 → Deli (0.53) → corridor ~0.66 → Tech (0.79) → right wall
-        """
+        """Staff-only ambient characters. Customers 0-2 are removed — live customers
+        are spawned dynamically. Only EMP/TRN/CSH appear, gated on hire count."""
         def make_char(x_frac, y_frac, vy, body_col, hat_col=None, label="", carrying=False):
-            # vy must never start at 0 or char won't move until a random flip
             vy = vy if vy != 0.0 else 1.0
             return {
-                "x_frac": float(x_frac),
-                "x": 0.0,
-                "y": 0.0,
-                "vy": float(vy),
+                "x_frac": float(x_frac), "x": 0.0, "y": 0.0, "vy": float(vy),
                 "walk_phase": random.uniform(0, math.pi * 2),
-                "body_col": body_col,
-                "hat_col": hat_col,
-                "label": label,
-                "carrying": carrying,
-                "pause_t": random.uniform(0.0, 0.6),  # stagger start
-                "y_frac": float(y_frac),
-                "moving": True,
+                "body_col": body_col, "hat_col": hat_col, "label": label,
+                "carrying": carrying, "pause_t": random.uniform(0.0, 0.6),
+                "y_frac": float(y_frac), "moving": True,
             }
 
-        # Each character is placed in a corridor gap, NOT inside a shelf.
-        # Corridor x_fracs (midpoints between section centres):
-        #   0.19 = between Grocery & Frozen
-        #   0.41 = between Frozen & Deli
-        #   0.66 = between Deli & Tech
-        #   0.91 = right of Tech (near checkout)
+        # Staff chars only — rendered in preview AND in game (gated on hire count)
         self._preview_chars = [
-            # Customer 1 — grocery/frozen corridor, heading down
-            make_char(0.19, 0.25,  1.0, (80, 140, 200)),
-            # Customer 2 — frozen/deli corridor, heading up
-            make_char(0.41, 0.70, -1.0, (200, 100, 80)),
-            # Customer 3 — deli/tech corridor, heading down
-            make_char(0.66, 0.40,  1.0, (140, 200, 100)),
-            # Employee — grocery/frozen corridor (opposite side to C1), heading up
-            make_char(0.19, 0.80, -1.0, (60, 160, 80), hat_col=(30, 100, 50), label="EMP", carrying=True),
-            # Trainee — frozen/deli corridor, heading down (behind C2)
+            make_char(0.19, 0.80, -1.0, (60, 160, 80),  hat_col=(30, 100, 50),  label="EMP", carrying=True),
             make_char(0.41, 0.30,  1.0, (220, 200, 60), hat_col=(180, 160, 20), label="TRN"),
-            # Cashier — near register, tiny vertical sway
-            make_char(0.91, 0.82,  0.3, (80, 100, 210), hat_col=(40, 60, 160), label="CSH"),
+            make_char(0.91, 0.82,  0.3, (80, 100, 210), hat_col=(40,  60, 160), label="CSH"),
         ]
-        # Per-character: (y_min_frac, y_max_frac, speed_px_per_s)
-        # y_min/max are fractions of inset height; keep away from shelf top sign band (~0.18)
-        # and from the register/mat zone at the bottom (~0.88)
         self._char_cfg = [
-            (0.20, 0.86, 70),   # C1
-            (0.20, 0.86, 52),   # C2
-            (0.20, 0.86, 60),   # C3
             (0.20, 0.86, 58),   # EMP
             (0.20, 0.86, 50),   # TRN
-            (0.78, 0.88,  9),   # CSH — tiny sway only
+            (0.78, 0.88,  9),   # CSH — tiny sway near register
         ]
 
     def draw_bytebit_logo(self, x: int, y: int, size: int = 80):
@@ -2103,9 +2489,68 @@ class App:
         self.draw_hud()
         self.draw_customers()
         self.draw_player()
+        self.draw_dialogue_bubble()
 
         if self.overlay:
             self.draw_overlay()
+
+    def draw_dialogue_bubble(self):
+        """Render the AI speech bubble above the active customer."""
+        if not self.dialogue_customer:
+            return
+
+        cx = int(self.dialogue_customer.get("draw_x", self.dialogue_customer["x"]))
+        cy = int(self.dialogue_customer.get("draw_y", self.dialogue_customer["y"]))
+
+        bubble_w = 340
+        bubble_h = 110
+        bx = max(10, min(WIDTH - bubble_w - 10, cx - bubble_w // 2))
+        by = cy - bubble_h - 50
+
+        # Shadow
+        sh = pygame.Surface((bubble_w + 12, bubble_h + 12), pygame.SRCALPHA)
+        pygame.draw.rect(sh, (0, 0, 0, 60), sh.get_rect(), border_radius=20)
+        self.screen.blit(sh, (bx - 6, by + 6))
+
+        # Bubble body
+        bubble = pygame.Surface((bubble_w, bubble_h), pygame.SRCALPHA)
+        pygame.draw.rect(bubble, (240, 248, 255, 240), bubble.get_rect(), border_radius=18)
+        pygame.draw.rect(bubble, (*ACCENT, 180), bubble.get_rect(), 2, border_radius=18)
+        self.screen.blit(bubble, (bx, by))
+
+        # Tail
+        tail_pts = [(cx - 8, by + bubble_h), (cx + 8, by + bubble_h), (cx, by + bubble_h + 18)]
+        pygame.draw.polygon(self.screen, (240, 248, 255), tail_pts)
+        pygame.draw.lines(self.screen, ACCENT, False, tail_pts[:2], 2)
+
+        # Mood badge
+        mood_col = SUCCESS if self.dialogue_customer.get("mood") == "happy" \
+                   else DANGER if self.dialogue_customer.get("mood") == "angry" else WARNING
+        mood_txt = self.dialogue_customer.get("mood", "neutral").upper()
+        draw_badge(self.screen, mood_txt, bx + 10, by + 8, color=mood_col)
+
+        if self.dialogue_loading:
+            dots = "." * (1 + int(self.auth_time * 3) % 3)
+            draw_text(self.screen, f"Thinking{dots}", (bx + 16, by + 44),
+                      size=BODY_SIZE, color=TEXT_MUTED)
+        elif self.dialogue_line:
+            # Word-wrap the line
+            words = self.dialogue_line.split()
+            lines, cur = [], ""
+            for w in words:
+                test = (cur + " " + w).strip()
+                if get_font(BODY_SIZE).size(test)[0] < bubble_w - 28:
+                    cur = test
+                else:
+                    lines.append(cur); cur = w
+            if cur:
+                lines.append(cur)
+            for li, line in enumerate(lines[:3]):
+                draw_text(self.screen, line, (bx + 16, by + 44 + li * 22), size=BODY_SIZE, color=TEXT_DARK)
+
+        if self.dialogue_response_pending:
+            draw_text(self.screen, "1 = Great response   2 = Poor response",
+                      (bx + 16, by + bubble_h - 22), size=SMALL_SIZE, color=TEXT_MUTED)
 
     def draw_store_map(self):  # noqa: C901  (complex but intentional)
         t = self.auth_time  # shared animation clock
@@ -2191,15 +2636,46 @@ class App:
         font_sec  = get_font(10, bold=True)
         font_sign = get_font(11, bold=True)
 
-        def draw_overhead_sign(cx, sign_y, text, bg_col, text_col=(255, 245, 200)):
+        def draw_overhead_sign(cx, sign_y, text, bg_col, fill_ratio=None, text_col=(255, 245, 200)):
+            """Draw a hanging aisle sign. If fill_ratio is given, render a compact
+            stock bar to the right of the sign text, flush inside the same pill."""
             lbl = font_sign.render(text, True, text_col)
             pad = 9
-            sw, sh = lbl.get_width() + pad * 2, lbl.get_height() + 6
+            # Base sign width = text only; if stock bar wanted, widen to fit it
+            bar_w_px = 48 if fill_ratio is not None else 0
+            bar_gap  = 6  if fill_ratio is not None else 0
+            sw = lbl.get_width() + pad * 2 + bar_w_px + bar_gap
+            sh = lbl.get_height() + 6
             sx = cx - sw // 2
+            # hanging wire
             pygame.draw.line(self.screen, (120, 120, 130), (cx, sign_y - 10), (cx, sign_y), 1)
+            # sign body
             pygame.draw.rect(self.screen, bg_col, (sx, sign_y, sw, sh), border_radius=4)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in bg_col), (sx, sign_y, sw, sh), 2, border_radius=4)
+            pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in bg_col),
+                             (sx, sign_y, sw, sh), 2, border_radius=4)
             self.screen.blit(lbl, (sx + pad, sign_y + 3))
+
+            # stock bar embedded in the sign
+            if fill_ratio is not None:
+                bx = sx + pad + lbl.get_width() + bar_gap
+                by = sign_y + sh // 2 - 4
+                bh = 8
+                # track
+                pygame.draw.rect(self.screen, (0, 0, 0, 60),
+                                 (bx, by, bar_w_px, bh), border_radius=4)
+                # fill colour: green > yellow > red
+                if fill_ratio > 0.5:
+                    fc = (80, 210, 100)
+                elif fill_ratio > 0.2:
+                    fc = (255, 185, 40)
+                else:
+                    fc = (220, 60, 60)
+                filled = max(2, int(bar_w_px * fill_ratio))
+                pygame.draw.rect(self.screen, fc,
+                                 (bx, by, filled, bh), border_radius=4)
+                # track border
+                pygame.draw.rect(self.screen, tuple(max(0, v - 50) for v in bg_col),
+                                 (bx, by, bar_w_px, bh), 1, border_radius=4)
 
         def draw_shelf_unit(sx, sy, sw, sh, products, layers=3):
             pygame.draw.rect(self.screen, WOOD, (sx, sy, sw, sh), border_radius=5)
@@ -2217,23 +2693,33 @@ class App:
                     pygame.draw.rect(self.screen, (255, 250, 180), (sx + 6 + pi * slot_w, plank_y - 3, slot_w - 1, 3))
 
         # ── section layout (4 sections across the store width) ────────────
-        # The store floor spans floor.x … floor.right.  We place 4 sections at
-        # 9 / 28 / 52 / 74 % of floor width, leaving corridor gaps between them.
         iw = floor.width
         ix = floor.x
-        SIGN_Y      = floor_y + 4
-        SHELF_STOP_Y = floor.bottom - 130   # shelves stop above the mat / register area
-        CONTENT_Y   = floor_y + 30
+        SIGN_Y       = floor_y + 4
+        SHELF_STOP_Y = floor.bottom - 130
+        CONTENT_Y    = floor_y + 30
 
         SEC_GROCERY_CX = ix + int(iw * 0.10)
         SEC_FROZEN_CX  = ix + int(iw * 0.30)
         SEC_DELI_CX    = ix + int(iw * 0.53)
         SEC_TECH_CX    = ix + int(iw * 0.74)
+        capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
 
-        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (60, 120, 60))
-        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (30, 90, 160))
-        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",    (160, 80, 40))
-        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",    (40, 40, 100))
+        def _section_fill(product_keys):
+            """Average fill ratio across a list of product keys."""
+            vals = [min(1.0, self.state.shelves.get(k, 0) / max(1, capacity))
+                    for k in product_keys]
+            return sum(vals) / max(1, len(vals))
+
+        grocery_fill = _section_fill(["chips", "milk", "bread", "apple"])
+        frozen_fill  = _section_fill(["frz_fruit", "frz_veg", "frz_protein"])
+        deli_fill    = _section_fill(["bread", "donut", "cake"])
+        tech_fill    = _section_fill(["phone", "laptop", "router"])
+
+        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (60, 120, 60),   fill_ratio=grocery_fill)
+        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (30, 90, 160),   fill_ratio=frozen_fill)
+        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",    (160, 80, 40),   fill_ratio=deli_fill)
+        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",    (40, 40, 100),   fill_ratio=tech_fill)
 
         # ── SECTION 1: Grocery shelves (live game state) ───────────────────
         grocery_products = [
@@ -2442,49 +2928,23 @@ class App:
             draw_text(self.screen, name.title(), rect.center, size=BODY_SIZE, color=TEXT_DARK, bold=True, center=True)
             draw_text(self.screen, "Press E", (rect.centerx, rect.bottom - 18), size=SMALL_SIZE, color=(78, 88, 118), center=True)
 
-        # ── gameplay shelves (hitboxes with real stock levels) ─────────────
-        labels = list(SHELF_LAYOUT.keys())
+        # ── gameplay shelf interaction hints (critical-low flash only — bars now on signs) ──
+        # Map each hitbox to its representative product key for fill display
+        HITBOX_PRODUCT = ["chips", "milk", "bread", "apple", "donut", "frz_fruit", "phone"]
         for i, rect in enumerate(self.shelf_hitboxes()):
-            # shelf unit body (rich style matching preview)
-            pygame.draw.rect(self.screen, WOOD, rect, border_radius=14)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in WOOD),
-                             (rect.right - 8, rect.y, 8, rect.height), border_radius=14)
-            for level in range(3):
-                py = rect.y + 18 + level * 30
-                pygame.draw.rect(self.screen, SHELF, (rect.x + 8, py, rect.width - 16, 8), border_radius=4)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in SHELF),
-                                 (rect.x + 8, py + 7, rect.width - 16, 2))
-
-            category    = labels[i]
-            product_key = SHELF_LAYOUT[category]
+            product_key = HITBOX_PRODUCT[i]
             capacity    = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
-            qty         = self.state.shelves[category]
+            qty         = self.state.shelves.get(product_key, 0)
             fill_ratio  = min(1.0, qty / max(1, capacity))
-            fill_color  = PRODUCT_CATALOG[product_key]["color"]
 
-            # product items with shimmer matching preview
-            for item_index in range(min(qty, 9)):
-                row = item_index // 3
-                col = item_index % 3
-                shimmer = int(math.sin(t * 2.0 + i + col + row) * 8)
-                ic = tuple(min(255, v + shimmer) for v in fill_color)
-                pygame.draw.rect(self.screen, ic,
-                                 (rect.x + 22 + col * 44, rect.y + 6 + row * 30, 26, 22),
-                                 border_radius=6)
-                # price-tag strip on each item
-                pygame.draw.rect(self.screen, (255, 250, 180),
-                                 (rect.x + 22 + col * 44, rect.y + 6 + row * 30 + 18, 26, 4))
+            # Critical-low flash only
+            if fill_ratio < 0.15:
+                pulse_a = int(abs(math.sin(t * 4)) * 60)
+                warn_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                pygame.draw.rect(warn_surf, (*DANGER, pulse_a), warn_surf.get_rect(), border_radius=8)
+                self.screen.blit(warn_surf, rect.topleft)
 
-            # stock level bar
-            bar = pygame.Rect(rect.x + 14, rect.bottom + 8, rect.width - 28, 10)
-            pygame.draw.rect(self.screen, PANEL_ALT, bar, border_radius=5)
-            bar_col = ACCENT if fill_ratio > 0.35 else WARNING if fill_ratio > 0.15 else DANGER
-            pygame.draw.rect(self.screen, bar_col, (bar.x, bar.y, int(bar.width * fill_ratio), bar.height), border_radius=5)
-
-            draw_text(self.screen, category.title(), (rect.x + 8, rect.bottom + 22), size=SMALL_SIZE, color=TEXT_DARK, bold=True)
-            draw_text(self.screen, f"${self.state.prices[product_key]:.2f}", (rect.right - 56, rect.bottom + 20), size=SMALL_SIZE, color=TEXT_DARK)
-
-        # ── animated walk characters (reuse preview chars if on game scene) ─
+        # ── animated walk characters: customers always walk; staff only if hired ─
         def draw_person_walk_game(px_pos, py_pos, body_color, hat_color, label,
                                   carrying, walk_phase, facing_down, paused,
                                   skin_tone=(224, 190, 155), hair_color=(60, 40, 25),
@@ -2533,25 +2993,23 @@ class App:
                 self.screen.blit(pill, (px_pos - lw // 2 - 4, py_pos + 24))
                 self.screen.blit(lsurf, (px_pos - lw // 2, py_pos + 26))
 
-        # Map preview char corridors to actual game floor coordinates.
-        # Corridors sit between the 4 sections (at ~20/42/62/90% of floor width).
-        corridor_x_fracs = [0.20, 0.42, 0.62, 0.90]
+        # ── staff ambient characters (only shown when hired) ──────────────
+        corridor_x_fracs = [0.20, 0.42, 0.90]
         game_char_xs = [floor.x + int(iw * f) for f in corridor_x_fracs]
         CHAR_DETAILS = [
-            ((220, 185, 145), (55,  35, 22), (45, 50, 80),  (28, 20, 16)),
-            ((175, 125,  85), (20,  15, 10), (55, 40, 35),  (22, 14, 10)),
-            ((235, 200, 165), (140, 80, 30), (35, 55, 45),  (26, 18, 14)),
-            ((160,  95,  60), (18,  12,  8), (40, 48, 70),  (24, 16, 12)),
-            ((210, 170, 130), (90,  55, 20), (50, 44, 35),  (30, 22, 18)),
-            ((225, 190, 155), (60,  45, 30), (35, 38, 65),  (25, 18, 14)),
+            ((160,  95,  60), (18, 12,  8), (40, 48, 70), (24, 16, 12)),  # EMP
+            ((210, 170, 130), (90, 55, 20), (50, 44, 35), (30, 22, 18)),  # TRN
+            ((225, 190, 155), (60, 45, 30), (35, 38, 65), (25, 18, 14)),  # CSH
         ]
+        staff_hired = len(self.state.staff) if self.state else 0
         for idx, ch in enumerate(self._preview_chars):
-            # Remap char x from preview inset to game floor
+            if staff_hired < (idx + 1):
+                continue
             ch_x = game_char_xs[idx % len(game_char_xs)]
-            ch_y = ch["y"]
-            # Clamp y to game floor bounds
-            ch_y = max(floor_y + 40, min(floor.bottom - 50, ch_y))
-            paused = ch["pause_t"] > 0
+            # Use live y updated by _update_staff_chars; clamp to floor bounds
+            ch_y = max(floor_y + 40, min(floor.bottom - 50, ch["y"]))
+            # paused = idle task stop; facing_down driven by direction of travel
+            paused      = ch["pause_t"] > 0
             facing_down = ch["vy"] >= 0
             sk, hr, pt, sh = CHAR_DETAILS[idx % len(CHAR_DETAILS)]
             draw_person_walk_game(
@@ -2602,23 +3060,212 @@ class App:
             draw_badge(self.screen, "PROMO BOOST ACTIVE", WIDTH - 290, HEIGHT - 84, color=SUCCESS)
 
     def draw_player(self):
-        shadow = pygame.Surface((48, 22), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow, (0, 0, 0, 55), shadow.get_rect())
-        self.screen.blit(shadow, (self.player.x - 24, self.player.y + 12))
-        pygame.draw.circle(self.screen, PLAYER, (int(self.player.x), int(self.player.y)), 18)
-        pygame.draw.circle(self.screen, ACCENT, (int(self.player.x), int(self.player.y) - 22), 13)
+        """Draw the player as a detailed store manager character (matching preview art style)."""
+        t = self.auth_time
+        px_pos = int(self.player.x)
+        py_pos = int(self.player.y)
+
+        keys = pygame.key.get_pressed()
+        moving = any([keys[pygame.K_w], keys[pygame.K_s], keys[pygame.K_a], keys[pygame.K_d],
+                      keys[pygame.K_UP], keys[pygame.K_DOWN], keys[pygame.K_LEFT], keys[pygame.K_RIGHT]])
+        facing_down = self.velocity.y >= 0
+
+        walk_phase = t * 8.0 if moving else 0.0
+        bob   = int(math.sin(walk_phase * 2) * 2.2) if moving else 0
+        swing = math.sin(walk_phase) if moving else 0.0
+        a_swing = math.sin(walk_phase + math.pi) if moving else 0.0
+
+        font_sec = get_font(10, bold=True)
+
+        # Manager colours — green apron over white shirt
+        body_color  = (210, 230, 210)   # light green apron
+        hat_color   = (60, 120, 70)     # dark green hat
+        skin_tone   = (235, 195, 160)
+        hair_color  = (55, 38, 22)
+        pant_color  = (50, 55, 85)
+        shoe_color  = (30, 22, 16)
+
+        # ground shadow
+        shadow_surf = pygame.Surface((34, 10), pygame.SRCALPHA)
+        for sx in range(17):
+            alpha = int(90 * (1 - (sx / 17) ** 1.6))
+            pygame.draw.line(shadow_surf, (0, 0, 0, alpha), (17 - sx, 5), (17 + sx, 5), 1)
+        self.screen.blit(shadow_surf, (px_pos - 17, py_pos + 22))
+
+        # legs
+        for li, (lx, lsw) in enumerate([(-4, swing), (3, -swing)]):
+            depth = li == 0
+            ly_extra = int(lsw * 8)
+            leg_shade = tuple(max(0, v - (18 if depth else 0)) for v in pant_color)
+            pygame.draw.rect(self.screen, leg_shade, (px_pos + lx - 1, py_pos + 8 + bob, 6, 7), border_radius=3)
+            pygame.draw.rect(self.screen, leg_shade, (px_pos + lx, py_pos + 14 + bob + ly_extra, 5, 6), border_radius=2)
+            shoe_x = px_pos + lx - (1 if facing_down else 0)
+            shoe_y = py_pos + 19 + bob + ly_extra
+            pygame.draw.rect(self.screen, shoe_color, (shoe_x, shoe_y, 8, 4), border_radius=2)
+            pygame.draw.line(self.screen, tuple(min(255, v + 22) for v in shoe_color),
+                             (shoe_x + 1, shoe_y + 1), (shoe_x + 6, shoe_y + 1), 1)
+
+        # torso / apron
+        torso_x, torso_y = px_pos - 8, py_pos - 8 + bob
+        pygame.draw.rect(self.screen, (235, 235, 235), (torso_x, torso_y, 16, 17), border_radius=4)  # white shirt under
+        pygame.draw.rect(self.screen, body_color, (torso_x + 2, torso_y, 12, 17), border_radius=3)    # green apron overlay
+        shadow_col = tuple(max(0, v - 38) for v in body_color)
+        pygame.draw.rect(self.screen, shadow_col, (torso_x + 11, torso_y + 2, 4, 13), border_radius=2)
+        # apron pocket
+        pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in body_color),
+                         (torso_x + 3, torso_y + 9, 6, 5), border_radius=2)
+
+        # arms
+        arm_col  = tuple(max(0, v - 22) for v in body_color)
+        arm_hi   = tuple(min(255, v + 18) for v in body_color)
+        skin_arm = tuple(max(0, v - 15) for v in skin_tone)
+        bax = px_pos - 14
+        bay = py_pos - 5 + int(a_swing * 7) + bob
+        pygame.draw.rect(self.screen, arm_col, (bax, bay, 6, 11), border_radius=3)
+        pygame.draw.rect(self.screen, skin_arm, (bax + 1, bay + 8, 4, 4), border_radius=2)
+        fax = px_pos + 8
+        fay = py_pos - 5 + int(-a_swing * 7) + bob
+        pygame.draw.rect(self.screen, arm_col, (fax, fay, 6, 11), border_radius=3)
+        pygame.draw.rect(self.screen, skin_arm, (fax + 1, fay + 8, 4, 4), border_radius=2)
+
+        # head
+        hx, hy = px_pos, py_pos - 20 + bob
+        head_r = 8
+        pygame.draw.rect(self.screen, skin_tone, (hx - 3, hy + head_r - 2, 6, 5), border_radius=2)
+        pygame.draw.circle(self.screen, skin_tone, (hx, hy), head_r)
+        pygame.draw.circle(self.screen, (235, 170, 155), (hx - 4, hy + 2), 3)
+        pygame.draw.circle(self.screen, (235, 170, 155), (hx + 4, hy + 2), 3)
+        pygame.draw.ellipse(self.screen, hair_color, (hx - head_r, hy - head_r, head_r * 2, head_r + 2))
+        pygame.draw.rect(self.screen, hair_color, (hx - head_r - 1, hy - 3, 3, 6), border_radius=1)
+        pygame.draw.rect(self.screen, hair_color, (hx + head_r - 2, hy - 3, 3, 6), border_radius=1)
+
+        # eyes
+        eye_dir = 1 if facing_down else -1
+        for ex_off in [-3, 3]:
+            ex = hx + ex_off
+            ey = hy - 2 + eye_dir
+            pygame.draw.ellipse(self.screen, (245, 245, 250), (ex - 2, ey - 1, 4, 3))
+            pygame.draw.circle(self.screen, (60, 90, 140), (ex, ey + 1), 1)
+        pygame.draw.arc(self.screen, (180, 100, 90),
+                        (hx - 3, hy + 3, 6, 4), math.pi + 0.4, 2 * math.pi - 0.4, 1)
+
+        # manager hat (visor cap)
+        hat_hi  = tuple(min(255, v + 35) for v in hat_color)
+        hat_shd = tuple(max(0, v - 30) for v in hat_color)
+        pygame.draw.rect(self.screen, hat_shd, (hx - head_r - 2, hy - head_r + 2, head_r * 2 + 4, 5), border_radius=2)
+        pygame.draw.rect(self.screen, hat_color, (hx - 6, hy - head_r - 6, 12, 9), border_radius=3)
+        pygame.draw.rect(self.screen, hat_hi, (hx - 4, hy - head_r - 5, 4, 4), border_radius=2)
+        # star badge
+        pygame.draw.circle(self.screen, (255, 215, 40), (hx + 2, hy - head_r - 2), 2)
+
+        # "YOU" label
+        lsurf = font_sec.render("YOU", True, (220, 240, 220))
+        lw = lsurf.get_width()
+        pill = pygame.Surface((lw + 8, 13), pygame.SRCALPHA)
+        pygame.draw.rect(pill, (30, 80, 40, 200), pill.get_rect(), border_radius=6)
+        self.screen.blit(pill, (px_pos - lw // 2 - 4, py_pos + 24))
+        self.screen.blit(lsurf, (px_pos - lw // 2, py_pos + 26))
 
     def draw_customers(self):
-        for customer in self.customers[:6]:
-            alpha = customer.get("alpha", 255)
-            surf = pygame.Surface((50, 70), pygame.SRCALPHA)
-            pygame.draw.circle(surf, (*CUSTOMER, alpha), (25, 40), 16)
-            pygame.draw.circle(surf, (255, 243, 232, alpha), (25, 18), 12)
-            patience_ratio = max(0, customer["patience"]) / 100
-            pygame.draw.rect(surf, (50, 54, 78, alpha), (7, 58, 36, 6), border_radius=3)
-            fill_color = WARNING if patience_ratio > 0.4 else DANGER
-            pygame.draw.rect(surf, (*fill_color, alpha), (7, 58, int(36 * patience_ratio), 6), border_radius=3)
-            self.screen.blit(surf, (customer["x"], customer["y"]))
+        font_sec = get_font(10, bold=True)
+        t = self.auth_time
+        floor = pygame.Rect(28, 74, WIDTH - 56, HEIGHT - 110)
+        floor_y = floor.y + 52  # below window row
+
+        CUST_SKIN   = [(220, 185, 145), (175, 125, 85), (235, 200, 165), (200, 155, 110), (245, 210, 175)]
+        CUST_HAIR   = [(55, 35, 22), (20, 15, 10), (140, 80, 30), (80, 50, 20), (180, 140, 80)]
+        CUST_SHIRT  = [(80, 140, 200), (200, 100, 80), (140, 200, 100), (200, 160, 60), (120, 90, 180)]
+        CUST_PANTS  = [(45, 50, 80), (55, 40, 35), (35, 55, 45), (50, 44, 35), (35, 38, 65)]
+
+        for idx, customer in enumerate(self.customers[:6]):
+            cx = int(customer.get("draw_x", customer["x"]))
+            cy = int(customer.get("draw_y", customer["y"]))
+
+            skin  = CUST_SKIN[idx % len(CUST_SKIN)]
+            hair  = CUST_HAIR[idx % len(CUST_HAIR)]
+            shirt = CUST_SHIRT[idx % len(CUST_SHIRT)]
+            pants = CUST_PANTS[idx % len(CUST_PANTS)]
+
+            walk_phase   = customer.get("walk_phase", 0.0)
+            is_walking   = customer.get("phase", "walk") != "queued"
+            facing_down  = customer.get("vy", 0) >= 0
+            bob   = int(math.sin(walk_phase * 2) * 2.2) if is_walking else 0
+            swing = math.sin(walk_phase) if is_walking else 0.0
+            a_swing = math.sin(walk_phase + math.pi) if is_walking else 0.0
+            shoe_color = (30, 22, 16)
+
+            alpha = min(255, customer.get("alpha", 255))
+
+            def tint(col, a=alpha):
+                # darken slightly when fading in
+                scale = a / 255.0
+                return tuple(int(v * scale) for v in col)
+
+            # shadow
+            shadow_surf = pygame.Surface((34, 10), pygame.SRCALPHA)
+            for sx in range(17):
+                sa = int(alpha * 0.35 * (1 - (sx / 17) ** 1.6))
+                pygame.draw.line(shadow_surf, (0, 0, 0, sa), (17 - sx, 5), (17 + sx, 5), 1)
+            self.screen.blit(shadow_surf, (cx - 17, cy + 22))
+
+            # legs
+            for li, (lx, lsw) in enumerate([(-4, swing), (3, -swing)]):
+                depth = li == 0
+                ly_extra = int(lsw * 8)
+                leg_shade = tuple(max(0, v - (18 if depth else 0)) for v in tint(pants))
+                pygame.draw.rect(self.screen, leg_shade, (cx + lx - 1, cy + 8 + bob, 6, 7), border_radius=3)
+                pygame.draw.rect(self.screen, leg_shade, (cx + lx, cy + 14 + bob + ly_extra, 5, 6), border_radius=2)
+                sx2 = cx + lx - (1 if facing_down else 0)
+                sy2 = cy + 19 + bob + ly_extra
+                pygame.draw.rect(self.screen, tint(shoe_color), (sx2, sy2, 8, 4), border_radius=2)
+
+            # torso
+            tx, ty = cx - 8, cy - 8 + bob
+            pygame.draw.rect(self.screen, tint(shirt), (tx, ty, 16, 17), border_radius=4)
+            shadow_col = tuple(max(0, v - 38) for v in tint(shirt))
+            pygame.draw.rect(self.screen, shadow_col, (tx + 11, ty + 2, 4, 13), border_radius=2)
+
+            # arms
+            arm_col = tuple(max(0, v - 22) for v in tint(shirt))
+            skin_arm = tuple(max(0, v - 15) for v in tint(skin))
+            pygame.draw.rect(self.screen, arm_col, (cx - 14, cy - 5 + int(a_swing * 7) + bob, 6, 11), border_radius=3)
+            pygame.draw.rect(self.screen, skin_arm, (cx - 13, cy + 3 + int(a_swing * 7) + bob, 4, 4), border_radius=2)
+            pygame.draw.rect(self.screen, arm_col, (cx + 8, cy - 5 + int(-a_swing * 7) + bob, 6, 11), border_radius=3)
+            pygame.draw.rect(self.screen, skin_arm, (cx + 9, cy + 3 + int(-a_swing * 7) + bob, 4, 4), border_radius=2)
+
+            # head
+            hx2, hy2 = cx, cy - 20 + bob
+            pygame.draw.circle(self.screen, tint(skin), (hx2, hy2), 8)
+            pygame.draw.ellipse(self.screen, tint(hair), (hx2 - 8, hy2 - 8, 16, 10))
+            pygame.draw.rect(self.screen, tint(hair), (hx2 - 9, hy2 - 3, 3, 6), border_radius=1)
+            pygame.draw.rect(self.screen, tint(hair), (hx2 + 6, hy2 - 3, 3, 6), border_radius=1)
+            eye_dir = 1 if facing_down else -1
+            for ex_off in [-3, 3]:
+                ex = hx2 + ex_off; ey = hy2 - 2 + eye_dir
+                pygame.draw.ellipse(self.screen, tint((245, 245, 250)), (ex - 2, ey - 1, 4, 3))
+                pygame.draw.circle(self.screen, tint((60, 90, 140)), (ex, ey + 1), 1)
+
+            # patience bar above head
+            patience_ratio = max(0.0, customer["patience"]) / 100.0
+            bar_w = 28
+            bar_x = cx - bar_w // 2
+            bar_y = cy - 36 + bob
+            pygame.draw.rect(self.screen, (40, 44, 60), (bar_x, bar_y, bar_w, 5), border_radius=2)
+            bar_col2 = SUCCESS if patience_ratio > 0.6 else WARNING if patience_ratio > 0.3 else DANGER
+            pygame.draw.rect(self.screen, bar_col2, (bar_x, bar_y, int(bar_w * patience_ratio), 5), border_radius=2)
+
+            # "E" hint when player is nearby and customer is queued
+            if customer.get("phase") == "queued":
+                px_pos2  = int(self.player.x)
+                py_pos2  = int(self.player.y)
+                dist2    = math.sqrt((px_pos2 - cx)**2 + (py_pos2 - cy)**2)
+                if dist2 < 100 and not self.dialogue_customer:
+                    hint = get_font(SMALL_SIZE, bold=True).render("[E] Talk", True, (220, 240, 220))
+                    hw2  = hint.get_width()
+                    pill2= pygame.Surface((hw2 + 12, 16), pygame.SRCALPHA)
+                    pygame.draw.rect(pill2, (30, 80, 40, 200), pill2.get_rect(), border_radius=8)
+                    self.screen.blit(pill2, (cx - hw2 // 2 - 6, bar_y - 22))
+                    self.screen.blit(hint,  (cx - hw2 // 2,     bar_y - 20))
 
     def draw_overlay(self):
         bg = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
@@ -2630,13 +3277,13 @@ class App:
         draw_shadowed_card(self.screen, panel, color=PANEL, radius=30)
 
         title_map = {
-            "stock": "Inventory & Stock Shelves",
-            "checkout": "Checkout",
-            "manager": "Employee Management & Upgrades",
-            "prices": "Smart Pricing",
+            "stock":       "Inventory & Stock Shelves",
+            "checkout":    "Checkout Register",
+            "manager":     "Employee Management & Upgrades",
+            "prices":      "Smart Pricing — All Products",
             "leaderboard": "Leaderboard",
-            "report": "Daily Report",
-            "reviews": "Customer Reviews",
+            "report":      "Daily Shift Report",
+            "reviews":     "Customer Reviews",
         }
 
         draw_text(self.screen, title_map.get(self.overlay, self.overlay.title()), (210, 126 + slide), size=TITLE_SIZE, bold=True)
@@ -2658,30 +3305,89 @@ class App:
             self.draw_reviews_overlay(panel)
 
     def draw_stock_overlay(self, panel: pygame.Rect):
-        draw_text(self.screen, "Keys 1-4 restock the matching section.", (210, 170), color=TEXT_MUTED)
+        all_product_keys = list(PRODUCT_CATALOG.keys())
+        active_cats      = self._get_active_cats_for_section()
+        section_label    = self.stock_section.title() if self.stock_section != "all" else "All Sections"
 
-        categories = list(SHELF_LAYOUT.keys())
-        x = 220
-        for idx, category in enumerate(categories):
-            rect = pygame.Rect(x, 225, 220, 330)
-            draw_shadowed_card(self.screen, rect, color=CARD, radius=24)
+        # ── instruction line — drawn just above the card grid ───────────
+        CONTENT_TOP = panel.y + 80     # clears title (y≈126) + ESC hint + breathing room
+        hint = (f"Section: {section_label}   •   1-9/R/T/Y to restock   •   "
+                f"Grey = go to that section first")
+        draw_text(self.screen, hint,
+                  (panel.x + 24, CONTENT_TOP - 22), size=SMALL_SIZE, color=TEXT_MUTED)
 
-            product_key = SHELF_LAYOUT[category]
-            capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
-            fill_ratio = min(1.0, self.state.shelves[category] / max(1, capacity))
+        # ── card grid — 6 per row × 2 rows for all 12 products ───────────
+        per_row = 6
+        gap     = 10
+        x0      = panel.x + 16
+        y0      = CONTENT_TOP
 
-            draw_text(self.screen, f"{idx + 1}. {category.title()}", (rect.x + 20, rect.y + 24), size=TITLE_SIZE, bold=True)
-            draw_text(self.screen, PRODUCT_CATALOG[product_key]["name"], (rect.x + 20, rect.y + 72), size=BODY_SIZE, color=TEXT_MUTED)
-            draw_text(self.screen, f"Storage: {self.state.storage[product_key]}", (rect.x + 20, rect.y + 124), size=BODY_SIZE)
-            draw_text(self.screen, f"Shelf: {self.state.shelves[category]}/{capacity}", (rect.x + 20, rect.y + 164), size=BODY_SIZE)
-            draw_text(self.screen, f"Price: ${self.state.prices[product_key]:.2f}", (rect.x + 20, rect.y + 204), size=BODY_SIZE)
+        avail_w = panel.width  - 32
+        avail_h = (panel.y + panel.height) - CONTENT_TOP - 12
 
-            color = PRODUCT_CATALOG[product_key]["color"]
-            pygame.draw.rect(self.screen, PANEL_ALT, (rect.x + 20, rect.y + 260, 180, 14), border_radius=7)
-            pygame.draw.rect(self.screen, color, (rect.x + 20, rect.y + 260, int(180 * fill_ratio), 14), border_radius=7)
-            pygame.draw.rect(self.screen, color, (rect.x + 20, rect.y + 288, 84, 28), border_radius=10)
+        card_w = (avail_w - gap * (per_row - 1)) // per_row
+        card_h = (avail_h - gap) // 2
 
-            x += 250
+        for idx, product_key in enumerate(all_product_keys):
+            col  = idx % per_row
+            row  = idx // per_row
+            rx   = x0 + col * (card_w + gap)
+            ry   = y0 + row * (card_h + gap)
+            rect = pygame.Rect(rx, ry, card_w, card_h)
+
+            cat         = PRODUCT_CATALOG[product_key]["category"]
+            can_stock   = self.stock_section == "all" or cat in active_cats
+            capacity    = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
+            qty         = self.state.shelves.get(product_key, 0)
+            storage     = self.state.storage.get(product_key, 0)
+            fill_ratio  = min(1.0, qty / max(1, capacity))
+            prod_color  = PRODUCT_CATALOG[product_key]["color"]
+            bar_col     = ACCENT if fill_ratio > 0.35 else WARNING if fill_ratio > 0.15 else DANGER
+
+            # Dim unavailable cards
+            card_bg  = CARD if can_stock else tuple(max(0, v - 22) for v in CARD)
+            bdr_col  = bar_col if can_stock else OUTLINE
+            bdr_w    = 2 if can_stock else 1
+
+            draw_shadowed_card(self.screen, rect, color=card_bg, radius=12,
+                               border_color=bdr_col, border_width=bdr_w)
+
+            self.screen.set_clip(rect.inflate(-2, -2))
+
+            # Key label + product name
+            EXTRA_KEY_LABELS = {9: "R", 10: "T", 11: "Y"}
+            key_lbl  = str(idx + 1) if idx < 9 else EXTRA_KEY_LABELS.get(idx, "–")
+            txt_col  = TEXT if can_stock else TEXT_MUTED
+            pygame.draw.circle(self.screen, prod_color if can_stock else OUTLINE,
+                               (rect.x + 12, rect.y + 14), 5)
+            draw_text(self.screen, f"{key_lbl}. {PRODUCT_CATALOG[product_key]['name']}",
+                      (rect.x + 22, rect.y + 7), size=SMALL_SIZE, bold=True, color=txt_col)
+
+            draw_text(self.screen, f"Storage: {storage}",
+                      (rect.x + 9, rect.y + 30), size=SMALL_SIZE, color=txt_col)
+            draw_text(self.screen, f"Shelf: {qty}/{capacity}",
+                      (rect.x + 9, rect.y + 50), size=SMALL_SIZE, color=txt_col)
+
+            if not can_stock:
+                sec = PRODUCT_CATALOG[product_key].get("section", "section").title()
+                draw_text(self.screen, f"→ {sec} area",
+                          (rect.x + 9, rect.y + 70), size=SMALL_SIZE, color=TEXT_MUTED)
+
+            # Stock bar
+            bar = pygame.Rect(rect.x + 9, rect.bottom - 28, card_w - 18, 6)
+            pygame.draw.rect(self.screen, PANEL_ALT, bar, border_radius=3)
+            if can_stock:
+                pygame.draw.rect(self.screen, bar_col,
+                                 (bar.x, bar.y, int(bar.width * fill_ratio), bar.height),
+                                 border_radius=3)
+
+            # Colour swatch at bottom
+            swatch_col = prod_color if can_stock else tuple(max(0, v - 40) for v in prod_color)
+            pygame.draw.rect(self.screen, swatch_col,
+                             (rect.x + 9, rect.bottom - 18, card_w - 18, 14),
+                             border_radius=4)
+
+            self.screen.set_clip(None)
 
     def draw_checkout_overlay(self, panel: pygame.Rect):
         if not self.current_customer:
@@ -2728,7 +3434,9 @@ class App:
         draw_badge(self.screen, "ENTER = COMPLETE SALE", right.x + 20, right.bottom - 70, color=ACCENT)
 
     def draw_manager_overlay(self, panel: pygame.Rect):
-        draw_text(self.screen, "1-5 hire  •  H fire  •  P promote  •  U/I/O upgrades  •  M promo", (210, 170), color=TEXT_MUTED)
+        CONTENT_TOP = panel.y + 80
+        draw_text(self.screen, "1-5 hire  •  H fire  •  P promote  •  U/I/O upgrades  •  M promo",
+                  (panel.x + 24, CONTENT_TOP - 22), size=SMALL_SIZE, color=TEXT_MUTED)
 
         x = 220
         for idx, candidate in enumerate(STAFF_POOL):
@@ -2761,65 +3469,169 @@ class App:
         draw_text(self.screen, "M • Social promotion ($120)", (up_box.x + 20, up_box.bottom - 38), size=BODY_SIZE, color=SUCCESS)
 
     def draw_prices_overlay(self, panel: pygame.Rect):
-        draw_text(self.screen, "1-4 apply suggested item price  •  A apply all", (210, 170), color=TEXT_MUTED)
+        all_keys = list(PRODUCT_CATALOG.keys())
 
-        x = 220
-        for idx, product_key in enumerate(PRODUCT_CATALOG):
-            rect = pygame.Rect(x, 235, 230, 330)
-            draw_shadowed_card(self.screen, rect, color=CARD, radius=24)
+        # The overlay title "Smart Pricing — All Products" draws at y=126 (slide-adjusted).
+        # Everything in this method must start below y≈168 to stay clear of that header row.
+        CONTENT_TOP = panel.y + 80    # safe top edge — well below title + ESC hint
 
-            current = self.state.prices[product_key]
-            stock = self.state.storage[product_key] + self.state.shelves[PRODUCT_CATALOG[product_key]["category"]]
-            suggested = price_suggestion(current, stock, self.state.demand[product_key])
+        # Instruction line pinned just above the cards
+        draw_text(self.screen,
+                  "Keys 1–9/R/T/Y apply suggested price   •   A = apply all",
+                  (panel.x + 24, CONTENT_TOP - 22),
+                  size=SMALL_SIZE, color=TEXT_MUTED)
 
-            draw_text(self.screen, f"{idx + 1}. {PRODUCT_CATALOG[product_key]['name']}", (rect.x + 18, rect.y + 24), size=TITLE_SIZE, bold=True)
-            draw_text(self.screen, f"Current: ${current:.2f}", (rect.x + 18, rect.y + 92), size=BODY_SIZE)
-            draw_text(self.screen, f"Suggested: ${suggested:.2f}", (rect.x + 18, rect.y + 132), size=BODY_SIZE, color=SUCCESS)
-            draw_text(self.screen, f"Demand: {self.state.demand[product_key]:.2f}", (rect.x + 18, rect.y + 176), size=BODY_SIZE)
-            draw_text(self.screen, f"Stock: {stock}", (rect.x + 18, rect.y + 216), size=BODY_SIZE)
+        # Layout: 6 cards per row, 2 rows
+        per_row = 6
+        n_rows  = 2
+        gap     = 10
 
+        avail_w = panel.width  - 32
+        avail_h = (panel.y + panel.height) - CONTENT_TOP - 12
+
+        card_w = (avail_w - gap * (per_row - 1)) // per_row
+        card_h = (avail_h - gap * (n_rows  - 1)) // n_rows
+
+        x0 = panel.x + 16
+        y0 = CONTENT_TOP
+
+        for idx, product_key in enumerate(all_keys):
+            col  = idx % per_row
+            row  = idx // per_row
+            rx   = x0 + col * (card_w + gap)
+            ry   = y0 + row * (card_h + gap)
+            rect = pygame.Rect(rx, ry, card_w, card_h)
+
+            current   = self.state.prices.get(product_key, PRODUCT_CATALOG[product_key]["base_price"])
+            shelf_qty = self.state.shelves.get(product_key, 0)
+            stock     = self.state.storage.get(product_key, 0) + shelf_qty
+            suggested = price_suggestion(current, stock, self.state.demand.get(product_key, 1.0))
+            color     = PRODUCT_CATALOG[product_key]["color"]
+            trend_up  = suggested >= current
+            border    = SUCCESS if trend_up else WARNING
+
+            draw_shadowed_card(self.screen, rect, color=CARD, radius=12,
+                               border_color=border, border_width=2)
+
+            self.screen.set_clip(rect.inflate(-2, -2))
+
+            # Colour pip + key number + product name
+            pygame.draw.circle(self.screen, color, (rect.x + 12, rect.y + 16), 5)
+            EXTRA_KEY_LABELS = {9: "R", 10: "T", 11: "Y"}
+            key_label = str(idx + 1) if idx < 9 else EXTRA_KEY_LABELS.get(idx, "–")
+            draw_text(self.screen, f"{key_label}. {PRODUCT_CATALOG[product_key]['name']}",
+                      (rect.x + 22, rect.y + 9), size=SMALL_SIZE, bold=True)
+
+            # Current price
+            draw_text(self.screen, f"Now: ${current:.2f}",
+                      (rect.x + 9, rect.y + 32), size=SMALL_SIZE, color=TEXT_MUTED)
+            # Suggested price (prominent)
+            draw_text(self.screen, f"→ ${suggested:.2f}",
+                      (rect.x + 9, rect.y + 52), size=BODY_SIZE, bold=True,
+                      color=SUCCESS if trend_up else WARNING)
+
+            # Demand + stock
+            draw_text(self.screen, f"Dmnd: {self.state.demand.get(product_key, 1.0):.2f}",
+                      (rect.x + 9, rect.y + 84), size=SMALL_SIZE, color=TEXT_MUTED)
+            draw_text(self.screen, f"Stk:  {stock}",
+                      (rect.x + 9, rect.y + 102), size=SMALL_SIZE, color=TEXT_MUTED)
+
+            # Trend bar pinned to card bottom
+            bar = pygame.Rect(rect.x + 9, rect.bottom - 22, card_w - 18, 6)
+            pygame.draw.rect(self.screen, PANEL_ALT, bar, border_radius=3)
             diff = max(-0.4, min(0.4, suggested - current))
-            bar = pygame.Rect(rect.x + 18, rect.y + 270, 180, 12)
-            pygame.draw.rect(self.screen, PANEL_ALT, bar, border_radius=6)
             fill = int((diff + 0.4) / 0.8 * bar.width)
-            pygame.draw.rect(self.screen, ACCENT if suggested >= current else WARNING, (bar.x, bar.y, fill, bar.height), border_radius=6)
+            pygame.draw.rect(self.screen, ACCENT if trend_up else WARNING,
+                             (bar.x, bar.y, fill, bar.height), border_radius=3)
 
-            x += 250
+            self.screen.set_clip(None)
 
     def draw_leaderboard_overlay(self, panel: pygame.Rect):
-        draw_text(self.screen, "Live data from Firebase Realtime Database", (210, 170), color=TEXT_MUTED)
+        draw_text(self.screen, "Live  •  Firebase Realtime Database",
+                  (panel.x + 340, panel.y + 34), size=SMALL_SIZE, color=TEXT_MUTED)
 
         rows = []
         try:
             raw = self.firebase.get_leaderboard(self.session.id_token) if self.session.id_token else {}
             for _, entry in (raw or {}).items():
                 rows.append(entry)
-            rows.sort(key=lambda x: x.get("score", 0), reverse=True)
+            rows.sort(key=lambda r: r.get("score", 0), reverse=True)
         except Exception as e:
-            draw_text(self.screen, str(e), (210, 220), size=BODY_SIZE, color=DANGER)
+            draw_text(self.screen, str(e)[:80], (panel.centerx, panel.y + 80),
+                      size=BODY_SIZE, color=DANGER, center=True)
             rows = []
 
-        table = pygame.Rect(210, 220, 1020, 460)
-        draw_shadowed_card(self.screen, table, color=CARD, radius=24)
+        # All x positions are absolute screen coords so header and data
+        # use the exact same number — no offset arithmetic that can drift.
+        TABLE_Y  = panel.y + 70
+        ROW_H    = 34
+        HEADER_H = 30
 
-        headers = [("Rank", 250), ("Username", 380), ("Score", 700), ("Money", 860), ("Day", 1030)]
-        for text, x in headers:
-            draw_text(self.screen, text, (x, 252), size=BODY_SIZE, bold=True)
+        # Absolute x centres/anchors for each column
+        X_RANK   = panel.x + 46           # centre of rank column
+        X_PLAYER = panel.x + 180          # left anchor of player name
+        X_SCORE  = panel.x + 560          # centre of score column
+        X_MONEY  = panel.x + 760          # centre of money column
+        X_DAY    = panel.x + 960          # centre of day column
 
-        y = 302
+        medal_colors = [(255, 215, 40), (192, 192, 192), (205, 127, 50)]
+
+        # ── Header ───────────────────────────────────────────────────────
+        hdr = pygame.Rect(panel.x + 24, TABLE_Y, panel.width - 48, HEADER_H)
+        pygame.draw.rect(self.screen, PANEL_ALT, hdr, border_radius=8)
+        pygame.draw.rect(self.screen, OUTLINE, hdr, 1, border_radius=8)
+
+        draw_text(self.screen, "PLAYER", (X_PLAYER, TABLE_Y + 8),
+                  size=SMALL_SIZE, bold=True, color=TEXT_MUTED)
+        draw_text(self.screen, "SCORE",  (X_SCORE,  TABLE_Y + 8),
+                  size=SMALL_SIZE, bold=True, color=TEXT_MUTED, center=True)
+        draw_text(self.screen, "MONEY",  (X_MONEY,  TABLE_Y + 8),
+                  size=SMALL_SIZE, bold=True, color=TEXT_MUTED, center=True)
+        draw_text(self.screen, "DAY",    (X_DAY,    TABLE_Y + 8),
+                  size=SMALL_SIZE, bold=True, color=TEXT_MUTED, center=True)
+
         if not rows:
-            draw_text(self.screen, "No leaderboard entries yet.", table.center, size=BODY_SIZE, color=TEXT_MUTED, center=True)
+            draw_text(self.screen, "No entries yet — be the first!",
+                      (panel.centerx, TABLE_Y + 100), size=BODY_SIZE, color=TEXT_MUTED, center=True)
             return
 
-        for i, entry in enumerate(rows[:10], start=1):
+        # ── Rows ─────────────────────────────────────────────────────────
+        for i, entry in enumerate(rows[:9], start=1):
+            ry = TABLE_Y + HEADER_H + (i - 1) * ROW_H + 2
+
+            # Row background
             if i == 1:
-                pygame.draw.rect(self.screen, (255, 213, 79, 30), (230, y - 10, 960, 34), border_radius=12)
-            draw_text(self.screen, str(i), (252, y), size=BODY_SIZE)
-            draw_text(self.screen, entry.get("username", "Player"), (380, y), size=BODY_SIZE)
-            draw_text(self.screen, str(entry.get("score", 0)), (700, y), size=BODY_SIZE)
-            draw_text(self.screen, f"${entry.get('money', 0):.2f}", (860, y), size=BODY_SIZE)
-            draw_text(self.screen, str(entry.get("day", 1)), (1030, y), size=BODY_SIZE)
-            y += 40
+                bg = pygame.Surface((panel.width - 48, ROW_H - 2), pygame.SRCALPHA)
+                pygame.draw.rect(bg, (255, 213, 79, 22), bg.get_rect(), border_radius=6)
+                self.screen.blit(bg, (panel.x + 24, ry))
+            elif i % 2 == 0:
+                bg = pygame.Surface((panel.width - 48, ROW_H - 2), pygame.SRCALPHA)
+                pygame.draw.rect(bg, (*PANEL_ALT, 80), bg.get_rect(), border_radius=4)
+                self.screen.blit(bg, (panel.x + 24, ry))
+
+            row_col = (255, 240, 180) if i == 1 else TEXT
+            ty = ry + 9
+
+            # Rank
+            mc = medal_colors[i - 1] if i <= 3 else TEXT_MUTED
+            draw_text(self.screen, str(i), (X_RANK, ty),
+                      size=SMALL_SIZE, bold=(i <= 3), color=mc, center=True)
+
+            # Data — each uses the same absolute x as its header above
+            username = entry.get("username", "Player")[:22]
+            draw_text(self.screen, username,                  (X_PLAYER, ty), size=SMALL_SIZE, color=row_col)
+            draw_text(self.screen, f"{entry.get('score',0):,}",           (X_SCORE,  ty), size=SMALL_SIZE, color=row_col, center=True)
+            draw_text(self.screen, f"${entry.get('money',0):,.0f}",       (X_MONEY,  ty), size=SMALL_SIZE, color=row_col, center=True)
+            draw_text(self.screen, str(entry.get("day", 1)),              (X_DAY,    ty), size=SMALL_SIZE, color=row_col, center=True)
+
+            # Subtle column dividers
+            for dx in [X_SCORE - 12, X_MONEY - 12, X_DAY - 12]:
+                pygame.draw.line(self.screen, OUTLINE, (dx, ry), (dx, ry + ROW_H - 3), 1)
+
+            # Row separator
+            pygame.draw.line(self.screen, OUTLINE,
+                             (panel.x + 28,           ry + ROW_H - 3),
+                             (panel.x + panel.width - 28, ry + ROW_H - 3), 1)
 
     def draw_report_overlay(self, panel: pygame.Rect):
         report = self.report_cache or (self.state.reports[-1] if self.state.reports else None)
