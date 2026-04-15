@@ -61,6 +61,7 @@ python -m venv .venv
 ```powershell
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install google-genai
 copy .env.example .env
 ```
 
