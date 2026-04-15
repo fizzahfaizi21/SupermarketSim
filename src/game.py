@@ -13,6 +13,7 @@ import json
 from typing import Dict, List, Optional
 
 import pygame
+import google.genai as genai
 
 from config.settings import *
 from src.firebase_service import FirebaseService
@@ -458,6 +459,16 @@ class App:
             return
         player_rect = pygame.Rect(self.player.x - 16, self.player.y - 16, 32, 32)
 
+        # ── customer dialogue ─────────────────────────────────────────────
+        # Check for customers first (any phase) to allow interaction anywhere
+        for customer in self.customers:
+            cx = customer.get("draw_x", customer["x"])
+            cy = customer.get("draw_y", customer["y"])
+            cust_rect = pygame.Rect(cx - 20, cy - 30, 40, 60)
+            if player_rect.colliderect(cust_rect.inflate(60, 60)):
+                self._start_dialogue(customer)
+                return
+
         # ── zone interactions ─────────────────────────────────────────────
         for name, rect in self.zone_rects.items():
             if player_rect.colliderect(rect.inflate(46, 46)):
@@ -487,18 +498,8 @@ class App:
                 self.open_overlay("stock")
                 return
 
-        # ── customer dialogue ─────────────────────────────────────────────
-        for customer in self.customers:
-            if customer.get("phase") == "queued":
-                cx = customer.get("draw_x", customer["x"])
-                cy = customer.get("draw_y", customer["y"])
-                cust_rect = pygame.Rect(cx - 20, cy - 30, 40, 60)
-                if player_rect.colliderect(cust_rect.inflate(60, 60)):
-                    self._start_dialogue(customer)
-                    return
-
     def _start_dialogue(self, customer: Dict):
-        """Initiate AI dialogue with a queued customer."""
+        """Initiate AI dialogue with a customer."""
         if self.dialogue_loading:
             return
         self.dialogue_customer = customer
@@ -522,33 +523,31 @@ class App:
 
         def fetch():
             try:
-                # Load API key from environment (same .env as Firebase)
+                # Load API key and optional model from environment (same .env as Firebase)
                 from pathlib import Path
                 from dotenv import load_dotenv
                 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-                api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+                api_key = os.getenv("GEMINI_API_KEY", "").strip()
+                gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
-                payload = json.dumps({
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 80,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": "Say something to the store manager."}],
-                }).encode()
-                req = urllib.request.Request(
-                    "https://api.anthropic.com/v1/messages",
-                    data=payload,
-                    headers={
-                        "Content-Type":    "application/json",
-                        "x-api-key":       api_key,
-                        "anthropic-version": "2023-06-01",
-                    },
-                    method="POST",
+                if not api_key:
+                    raise Exception("GEMINI_API_KEY not found")
+                if not gemini_model:
+                    raise Exception("GEMINI_MODEL not configured")
+
+                print("Gemini model:", gemini_model)
+                self.toasts.show(f"Using Gemini model: {gemini_model}", INFO, duration=3.0)
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(
+                    model=gemini_model,
+                    contents=system_prompt + "\n\nSay something to the store manager."
                 )
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    data = json.loads(resp.read())
-                    line = data["content"][0]["text"].strip().strip('"')
-                    self.dialogue_line = line
-            except Exception:
+                line = response.text.strip().strip('"')
+                self.dialogue_line = line
+            except Exception as e:
+                error_text = f"Gemini error: {e}"
+                print(error_text)
+                self.toasts.show(error_text, DANGER, duration=4.0)
                 moods = {
                     "happy":   "Hi there! Lovely store you have here.",
                     "neutral": "Excuse me, can I get some help?",
@@ -660,7 +659,8 @@ class App:
         self.overlay_anim += (target - self.overlay_anim) * min(1.0, dt * speed)
 
         if self.scene == "game" and self.state:
-            self.update_player(dt)
+            if not self.dialogue_customer:
+                self.update_player(dt)
             self._update_staff_chars(dt)
 
             if not self.overlay:
@@ -673,7 +673,8 @@ class App:
                 if self.state.stress > 80:
                     self.state.satisfaction = max(0, self.state.satisfaction - 1)
 
-                self.update_customers(dt)
+                if not self.dialogue_customer:
+                    self.update_customers(dt)
 
                 # Dynamic customer cap — fewer customers allowed near closing time
                 day_frac_cap = 1.0 - max(0.0, min(1.0,
