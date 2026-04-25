@@ -379,7 +379,9 @@ class App:
                     self.set_scene("menu")
 
             elif event.key == pygame.K_e and not self.overlay and not self.dialogue_customer:
-                self.try_interact()
+                self.try_interact_zones()
+            elif event.key == pygame.K_f and not self.overlay and not self.dialogue_customer:
+                self.try_interact_customer()
 
             elif self.overlay == "checkout":
                 if event.key == pygame.K_BACKSPACE:
@@ -412,63 +414,57 @@ class App:
             elif self.overlay == "prices":
                 all_keys = list(PRODUCT_CATALOG.keys())
                 num = len(all_keys)
-                # Keys 1-9 apply suggestion for that product index
                 for ki in range(min(9, num)):
                     if event.key == pygame.K_1 + ki:
                         self.apply_price_suggestion(ki)
                         break
+                extra_price_keys = {pygame.K_r: 9, pygame.K_t: 10, pygame.K_y: 11}
+                if event.key in extra_price_keys:
+                    idx = extra_price_keys[event.key]
+                    if idx < num:
+                        self.apply_price_suggestion(idx)
                 if event.key == pygame.K_a:
                     for idx in range(num):
                         self.apply_price_suggestion(idx, silent=True)
                     self.toasts.show("Applied all suggested prices.", SUCCESS)
 
             elif self.overlay == "stock":
-                # Which categories are stockable in this section
                 active_cats   = self._get_active_cats_for_section()
                 all_keys_list = list(PRODUCT_CATALOG.keys())
-                for ki in range(min(9, len(all_keys_list))):
-                    if event.key == pygame.K_1 + ki:
-                        product_key = all_keys_list[ki]
-                        prod_cat    = PRODUCT_CATALOG[product_key]["category"]
-                        # Match by category (handles secondary products like cake/frz_veg/laptop)
-                        shelf_cat   = next(
-                            (c for c in SHELF_LAYOUT if c == prod_cat),
-                            None
-                        )
-                        if shelf_cat and (self.stock_section == "all" or shelf_cat in active_cats):
-                            cat_idx = list(SHELF_LAYOUT.keys()).index(shelf_cat)
-                            self.stock_shelf(cat_idx)
-                        else:
-                            section_name = PRODUCT_CATALOG[product_key].get("section", "its section").title()
-                            self.toasts.show(f"Go to {section_name} section to stock this item.", WARNING)
-                        break
+                stock_key_map = {pygame.K_1 + i: all_keys_list[i]
+                                 for i in range(min(9, len(all_keys_list)))}
+                if len(all_keys_list) > 9:  stock_key_map[pygame.K_r] = all_keys_list[9]
+                if len(all_keys_list) > 10: stock_key_map[pygame.K_t] = all_keys_list[10]
+                if len(all_keys_list) > 11: stock_key_map[pygame.K_y] = all_keys_list[11]
+                if event.key in stock_key_map:
+                    product_key = stock_key_map[event.key]
+                    shelf_cat   = PRODUCT_CATALOG[product_key]["category"]
+                    if self.stock_section == "all" or shelf_cat in active_cats:
+                        self.stock_shelf_by_product(product_key)
+                    else:
+                        section_name = PRODUCT_CATALOG[product_key].get("section", "its section").title()
+                        self.toasts.show(f"Go to {section_name} section to stock this item.", WARNING)
 
     def try_interact(self):
+        self.try_interact_zones()
+
+    def try_interact_zones(self):
+        """E key: zones and shelves only."""
         if not self.state:
             return
         player_rect = pygame.Rect(self.player.x - 16, self.player.y - 16, 32, 32)
-
-        # ── zone interactions ─────────────────────────────────────────────
         for name, rect in self.zone_rects.items():
             if player_rect.colliderect(rect.inflate(46, 46)):
                 if name == "break":
                     self.take_break()
                     return
                 if name == "stock":
-                    self.stock_section = "all"   # Stock zone = manage all storage
+                    self.stock_section = "all"
                 self.open_overlay(name)
                 return
-
-        # ── shelf / section interactions ──────────────────────────────────
-        # Maps hitbox index → which section products can be stocked here
         HITBOX_SECTION = {
-            0: "grocery",   # snack
-            1: "grocery",   # dairy
-            2: "deli",      # bakery
-            3: "grocery",   # produce
-            4: "deli",      # deli
-            5: "frozen",    # frozen
-            6: "tech",      # tech
+            0: "grocery", 1: "grocery", 2: "deli",
+            3: "grocery", 4: "deli",    5: "frozen", 6: "tech",
         }
         for i, rect in enumerate(self.shelf_hitboxes()):
             if player_rect.colliderect(rect.inflate(40, 40)):
@@ -477,7 +473,11 @@ class App:
                 self.open_overlay("stock")
                 return
 
-        # ── customer dialogue ─────────────────────────────────────────────
+    def try_interact_customer(self):
+        """F key: customer dialogue only."""
+        if not self.state:
+            return
+        player_rect = pygame.Rect(self.player.x - 16, self.player.y - 16, 32, 32)
         for customer in self.customers:
             if customer.get("phase") == "queued":
                 cx = customer.get("draw_x", customer["x"])
@@ -965,7 +965,7 @@ class App:
             "grocery": {"snack", "dairy", "produce"},
             "deli":    {"bakery", "deli"},
             "frozen":  {"frozen"},
-            "tech":    {"tech"},
+            "tech":    {"phone", "laptop", "router"},
             "all":     set(SHELF_LAYOUT.keys()),
         }
         return mapping.get(self.stock_section, set(SHELF_LAYOUT.keys()))
@@ -1008,6 +1008,27 @@ class App:
         names = ", ".join(PRODUCT_CATALOG[k]["name"] for k in section_products)
         self.toasts.show(f"No {names} left in storage.", DANGER)
 
+    def stock_shelf_by_product(self, product_key: str):
+        """Stock one specific product onto its own individual shelf slot."""
+        if not self.state or product_key not in PRODUCT_CATALOG:
+            return
+        shelf_cat = PRODUCT_CATALOG[product_key]["category"]
+        capacity  = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
+        current   = self.state.shelves.get(shelf_cat, 0)
+        if current >= capacity:
+            self.toasts.show(f"{PRODUCT_CATALOG[product_key]['name']} shelf is already full.", WARNING)
+            return
+        available = self.state.storage.get(product_key, 0)
+        if available <= 0:
+            self.toasts.show(f"No {PRODUCT_CATALOG[product_key]['name']} left in storage.", DANGER)
+            return
+        moved = min(4, available, capacity - current)
+        self.state.storage[product_key] -= moved
+        self.state.shelves[shelf_cat]    = current + moved
+        self.state.score                += moved * 2
+        self.state.satisfaction          = min(100, self.state.satisfaction + 1)
+        self.toasts.show(f"+ Restocked: {moved}× {PRODUCT_CATALOG[product_key]['name']}", SUCCESS)
+
     def resolve_complaint(self, good_response: bool):
         if not self.current_customer or not self.current_customer.get("complaint"):
             return
@@ -1029,15 +1050,9 @@ class App:
 
         # Verify shelf stock exists for every item
         for product_key, qty in self.current_customer["items"].items():
-            cat = PRODUCT_CATALOG[product_key]["category"]
-            # Find which SHELF_LAYOUT category covers this product
-            shelf_cat = next((c for c, pk in SHELF_LAYOUT.items() if pk == product_key or
-                              PRODUCT_CATALOG[product_key]["category"] == c), None)
-            # Fallback: find any shelf category that holds this product type
-            if shelf_cat is None:
-                shelf_cat = cat
+            shelf_cat = PRODUCT_CATALOG[product_key]["category"]
             if self.state.shelves.get(shelf_cat, 0) < qty:
-                self.toasts.show("Shelf stock too low for this sale.", DANGER)
+                self.toasts.show(f"Shelf stock too low: {PRODUCT_CATALOG[product_key]['name']}.", DANGER)
                 return
 
         if self.current_customer["pay_with"] == "cash":
@@ -1054,9 +1069,7 @@ class App:
                 return
 
         for product_key, qty in self.current_customer["items"].items():
-            cat = PRODUCT_CATALOG[product_key]["category"]
-            shelf_cat = next((c for c, pk in SHELF_LAYOUT.items()
-                              if PRODUCT_CATALOG[product_key]["category"] == c), cat)
+            shelf_cat = PRODUCT_CATALOG[product_key]["category"]
             if shelf_cat in self.state.shelves:
                 self.state.shelves[shelf_cat] = max(0, self.state.shelves[shelf_cat] - qty)
             self.state.demand[product_key] = min(2.2, self.state.demand.get(product_key, 1.0) + 0.06 * qty)
@@ -1298,21 +1311,18 @@ class App:
         ]
 
     def draw_bytebit_logo(self, x: int, y: int, size: int = 80):
-        """Pixel-art grocery store logo with storefront, awning, cart symbol, and produce."""
-        s = size
-        ps = max(2, s // 20)   # pixel unit size
+        """High-quality vibrant pixel-art store logo — Byte Bit Market."""
+        s   = size
+        ps  = max(2, s // 18)
+        bob = int(math.sin(self.auth_time * 2.0) * 5)
+        y  += bob
 
-        # bob animation
-        bob = int(math.sin(self.auth_time * 2.2) * 4)
-        y += bob
-
-        # --- glow halo ---
-        glow_r = s // 2 + 20
+        # ── pulsing outer glow ──────────────────────────────────────────
+        glow_r = s // 2 + 28
         glow_surf = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
-        for radius in range(glow_r, 0, -3):
-            alpha = max(0, int(55 * (1 - radius / glow_r)))
-            pygame.draw.rect(glow_surf, (*ACCENT, alpha),
-                             (glow_r - radius, glow_r - radius, radius * 2, radius * 2))
+        pulse_a = int(35 + 22 * math.sin(self.auth_time * 1.6))
+        pygame.draw.circle(glow_surf, (80, 220, 120, pulse_a), (glow_r, glow_r), glow_r)
+        pygame.draw.circle(glow_surf, (80, 220, 120, pulse_a // 2), (glow_r, glow_r), glow_r - 10)
         self.screen.blit(glow_surf, (x + s // 2 - glow_r, y + s // 2 - glow_r))
 
         def px(gx, gy, color, w=1, h=1):
@@ -1322,117 +1332,339 @@ class App:
         cols = s // ps
         rows = s // ps
 
-        # --- background ---
-        for gx in range(cols):
-            for gy in range(rows):
-                px(gx, gy, (20, 28, 52))
+        # ── rich dark background with subtle gradient ───────────────────
+        for gy2 in range(rows):
+            shade = int(lerp(18, 28, gy2 / max(1, rows)))
+            for gx2 in range(cols):
+                px(gx2, gy2, (shade, shade + 8, shade + 32))
 
-        # --- roof structure (triangular pixel peak) ---
-        peak_col = (60, 80, 140)
-        for gx in range(cols):
-            px(gx, 0, peak_col)
-            px(gx, 1, peak_col)
-        # chimney-like peak centre
-        mid = cols // 2
-        for gy in range(-2, 2):
-            pass  # skip, keep flat
+        # ── sky blue backdrop block ─────────────────────────────────────
+        for gy2 in range(1, rows - 2):
+            for gx2 in range(1, cols - 1):
+                px(gx2, gy2, (68, 148, 213))
 
-        # --- awning: red/white striped ---
-        awning_rows = 3
-        for gy in range(2, 2 + awning_rows):
-            for gx in range(cols):
-                stripe_col = (210, 50, 50) if gx % 2 == 0 else (240, 240, 240)
-                px(gx, gy, stripe_col)
+        # ── bright store roof — brick-red with highlight ────────────────
+        roof_hi  = (220, 75, 55)
+        roof_mid = (185, 55, 40)
+        roof_shd = (140, 35, 25)
+        for gx2 in range(cols):
+            px(gx2, 0, roof_hi  if gx2 % 4 != 3 else roof_mid)
+            px(gx2, 1, roof_mid if gx2 % 2 == 0 else roof_shd)
 
-        # awning scalloped bottom edge (alternating drop pixels)
-        scallop_y = 2 + awning_rows
-        for gx in range(cols):
-            drop_col = (210, 50, 50) if gx % 2 == 0 else (180, 30, 30)
-            px(gx, scallop_y, drop_col)
+        # ── awning — vivid green/white stripes with scallop ────────────
+        awn_hi  = (60, 200, 90)
+        awn_mid = (45, 165, 70)
+        awn_shd = (30, 120, 50)
+        for gx2 in range(cols):
+            stripe = gx2 % 3
+            c = awn_hi if stripe == 0 else (awn_mid if stripe == 1 else (240, 248, 240))
+            px(gx2, 2, c)
+            px(gx2, 3, awn_mid if stripe != 2 else (200, 230, 200))
+        # scallop drop
+        for gx2 in range(cols):
+            px(gx2, 4, awn_shd if gx2 % 2 == 0 else awn_mid)
 
-        # --- store facade (wall) ---
-        wall_top = scallop_y + 1
-        wall_bot = rows - 3
-        wall_col = (235, 235, 220)
-        for gx in range(cols):
-            for gy in range(wall_top, wall_bot):
-                px(gx, gy, wall_col)
+        # ── warm cream facade ───────────────────────────────────────────
+        wall_top = 5
+        wall_bot = rows - 4
+        wall_hi  = (245, 238, 218)
+        wall_mid = (228, 218, 196)
+        wall_shd = (195, 185, 165)
+        for gy2 in range(wall_top, wall_bot):
+            for gx2 in range(cols):
+                if gx2 == 0:
+                    px(gx2, gy2, wall_shd)
+                elif gx2 == cols - 1:
+                    px(gx2, gy2, wall_shd)
+                elif gy2 == wall_top:
+                    px(gx2, gy2, wall_hi)
+                else:
+                    px(gx2, gy2, wall_mid)
 
-        # --- sign strip above door ---
-        sign_y = wall_top
-        sign_h = 2
-        sign_col = (40, 120, 200)
-        for gx in range(1, cols - 1):
-            for gy in range(sign_y, sign_y + sign_h):
-                px(gx, gy, sign_col)
+        # ── sign strip — vibrant blue with shimmer ──────────────────────
+        sign_shimmer = int(math.sin(self.auth_time * 3.0) * 20)
+        sign_col = (40 + sign_shimmer, 130, 220)
+        for gx2 in range(1, cols - 1):
+            px(gx2, wall_top,     sign_col)
+            px(gx2, wall_top + 1, (max(0, sign_col[0] - 30), 100, 180))
 
-        # --- windows (left and right of door) ---
-        win_w, win_h = 3, 3
-        win_top = wall_top + sign_h + 1
-        # flicker
-        flicker = int(math.sin(self.auth_time * 4.0) * 15)
-        win_col = (min(255, 190 + flicker), min(255, 230 + flicker), min(255, 140 + flicker))
-        win_frame = (80, 60, 40)
+        # ── windows — amber glow with flicker ──────────────────────────
+        flicker = int(math.sin(self.auth_time * 4.5) * 18)
+        win_col   = (min(255, 230 + flicker), min(255, 195 + flicker), 80)
+        win_frame = (100, 72, 35)
+        win_hi    = (min(255, 255), min(255, 240 + flicker), 140)
+        win_w2 = 3; win_h2 = 3
+        win_top2 = wall_top + 3
+        for wx in (1, cols - 1 - win_w2):
+            for gx2 in range(wx - 1, wx + win_w2 + 1):
+                for gy2 in range(win_top2 - 1, win_top2 + win_h2 + 1):
+                    px(gx2, gy2, win_frame)
+            for gx2 in range(wx, wx + win_w2):
+                for gy2 in range(win_top2, win_top2 + win_h2):
+                    c = win_hi if (gx2 == wx and gy2 == win_top2) else win_col
+                    px(gx2, gy2, c)
+            px(wx + win_w2 // 2, win_top2,               win_frame)
+            px(wx + win_w2 // 2, win_top2 + 1,           win_frame)
+            px(wx,               win_top2 + win_h2 // 2, win_frame)
+            px(wx + 1,           win_top2 + win_h2 // 2, win_frame)
+            px(wx + 2,           win_top2 + win_h2 // 2, win_frame)
 
-        left_win_x = 1
-        right_win_x = cols - 1 - win_w
-        for wx in (left_win_x, right_win_x):
-            # frame
-            for gx in range(wx - 1, wx + win_w + 1):
-                for gy in range(win_top - 1, win_top + win_h + 1):
-                    px(gx, gy, win_frame)
-            # glass
-            for gx in range(wx, wx + win_w):
-                for gy in range(win_top, win_top + win_h):
-                    px(gx, gy, win_col)
-            # window cross divider
-            mid_wx = wx + win_w // 2
-            mid_wy = win_top + win_h // 2
-            for gx in range(wx, wx + win_w):
-                px(gx, mid_wy, win_frame)
-            for gy in range(win_top, win_top + win_h):
-                px(mid_wx, gy, win_frame)
-
-        # --- door (centre) ---
-        door_w = max(3, cols // 4)
-        door_h = wall_bot - win_top - sign_h
-        door_x = mid - door_w // 2
-        door_top = wall_bot - door_h
-        door_col = (100, 140, 200)
-        door_frame_col = (80, 60, 40)
-        for gx in range(door_x - 1, door_x + door_w + 1):
-            for gy in range(door_top - 1, wall_bot):
-                px(gx, gy, door_frame_col)
-        for gx in range(door_x, door_x + door_w):
-            for gy in range(door_top, wall_bot):
-                px(gx, gy, door_col)
+        # ── sliding glass door — vivid cyan ────────────────────────────
+        mid2 = cols // 2
+        door_w2 = max(4, cols // 3)
+        door_x2 = mid2 - door_w2 // 2
+        door_top2 = wall_bot - 5
+        door_hi  = (130, 215, 240)
+        door_mid = (90, 180, 215)
+        door_frm = (70, 55, 35)
+        for gx2 in range(door_x2 - 1, door_x2 + door_w2 + 1):
+            for gy2 in range(door_top2 - 1, wall_bot):
+                px(gx2, gy2, door_frm)
+        for gx2 in range(door_x2, door_x2 + door_w2):
+            for gy2 in range(door_top2, wall_bot):
+                c = door_hi if gx2 < door_x2 + door_w2 // 2 else door_mid
+                px(gx2, gy2, c)
+        # door centre divider
+        px(door_x2 + door_w2 // 2 - 1, door_top2, door_frm)
+        px(door_x2 + door_w2 // 2 - 1, door_top2 + 1, door_frm)
+        px(door_x2 + door_w2 // 2 - 1, door_top2 + 2, door_frm)
         # door handle
-        px(door_x + door_w - 1, door_top + door_h // 2, (230, 200, 60))
+        px(door_x2 + 1, door_top2 + 2, (220, 195, 55))
+        px(door_x2 + door_w2 - 2, door_top2 + 2, (220, 195, 55))
 
-        # --- ground / step ---
-        step_col = (160, 160, 150)
-        for gx in range(cols):
-            for gy in range(wall_bot, rows):
-                px(gx, gy, step_col)
+        # ── pavement / step — shaded concrete ──────────────────────────
+        pave_hi  = (175, 172, 162)
+        pave_mid = (148, 144, 132)
+        pave_shd = (112, 108, 98)
+        for gx2 in range(cols):
+            px(gx2, wall_bot,     pave_hi)
+            px(gx2, wall_bot + 1, pave_mid)
+            px(gx2, wall_bot + 2, pave_shd)
 
-        # --- mini shopping cart icon (bottom-left corner) ---
-        cart_x = 0
-        cart_y = rows - 3
-        # cart body pixel outline
-        cart_col = (60, 180, 100)
-        px(cart_x,     cart_y,     cart_col)
-        px(cart_x + 1, cart_y,     cart_col)
-        px(cart_x + 2, cart_y,     cart_col)
-        px(cart_x + 2, cart_y + 1, cart_col)
-        px(cart_x,     cart_y + 1, cart_col)
-        # wheels
-        px(cart_x,     cart_y + 2, (40, 40, 40))
-        px(cart_x + 2, cart_y + 2, (40, 40, 40))
+        # ── vivid shopping cart icon — bottom-left ──────────────────────
+        cart_x2 = 0; cart_y2 = rows - 3
+        cart_grn = (55, 195, 95)
+        cart_shd2 = (35, 140, 65)
+        px(cart_x2, cart_y2, cart_grn, 3, 1)
+        px(cart_x2 + 2, cart_y2 + 1, cart_grn)
+        px(cart_x2, cart_y2 + 1, cart_grn)
+        px(cart_x2, cart_y2 + 1, cart_shd2, 3, 1)
+        px(cart_x2, cart_y2 + 2, (38, 38, 42), 1, 1)
+        px(cart_x2 + 2, cart_y2 + 2, (38, 38, 42), 1, 1)
+        px(cart_x2 + 1, cart_y2 + 2, (60, 60, 68), 1, 1)
 
-        # --- mini produce dots (top-right corner) ---
-        produce_colors = [(232, 86, 86), (245, 180, 80), (100, 200, 80)]
-        for pi, pc in enumerate(produce_colors):
-            px(cols - 3 + pi, rows - 3, pc)
+        # ── vibrant produce dots — top-right ────────────────────────────
+        dots = [(235, 62, 62), (252, 185, 45), (55, 200, 75)]
+        for di, dc in enumerate(dots):
+            px(cols - 4 + di, rows - 3, dc)
+            hi = tuple(min(255, v + 40) for v in dc)
+            px(cols - 4 + di, rows - 3, (hi[0], hi[1], hi[2]), 1, 1)
+
+    def draw_auth(self):
+        t = self.auth_time
+
+        # ── Vibrant animated background ─────────────────────────────────
+        # Rich deep-blue/teal gradient base
+        for row in range(HEIGHT):
+            frac = row / HEIGHT
+            r = int(lerp(8,  22, frac))
+            g = int(lerp(18, 42, frac))
+            b = int(lerp(38, 68, frac))
+            pygame.draw.line(self.screen, (r, g, b), (0, row), (WIDTH, row))
+
+        # Pixel grid lines — subtle teal
+        for gx in range(0, WIDTH, 40):
+            s = pygame.Surface((1, HEIGHT), pygame.SRCALPHA)
+            s.fill((60, 180, 140, 18))
+            self.screen.blit(s, (gx, 0))
+        for gy in range(0, HEIGHT, 40):
+            s = pygame.Surface((WIDTH, 1), pygame.SRCALPHA)
+            s.fill((60, 180, 140, 18))
+            self.screen.blit(s, (0, gy))
+
+        # Drifting pixel sparkles — vibrant multi-color
+        particle_colors = [
+            (80, 230, 120),   # bright green
+            (255, 210, 60),   # yellow
+            (100, 200, 255),  # sky blue
+            (255, 130, 80),   # orange
+            (200, 100, 255),  # purple
+        ]
+        for p in self.pixel_particles:
+            age_frac = p[5] / max(0.001, p[6])
+            alpha = int(220 * (1 - abs(age_frac * 2 - 1)))
+            c = particle_colors[p[3] % len(particle_colors)]
+            ps2 = p[2]
+            # draw pixel with bright highlight corner
+            psurf = pygame.Surface((ps2, ps2), pygame.SRCALPHA)
+            psurf.fill((*c, alpha))
+            # highlight top-left pixel
+            if ps2 >= 4:
+                hi = tuple(min(255, v + 60) for v in c)
+                pygame.draw.rect(psurf, (*hi, alpha), (0, 0, ps2 // 2, ps2 // 2))
+            self.screen.blit(psurf, (int(p[0]), int(p[1])))
+
+        # ── LEFT login card — rich dark panel with green border ─────────
+        card = pygame.Rect(60, 80, 560, 720)
+
+        # Multi-layer shadow for depth
+        for sh_off in [12, 8, 4]:
+            shad = pygame.Surface((card.width, card.height), pygame.SRCALPHA)
+            shad.fill((0, 0, 0, 28))
+            self.screen.blit(shad, (card.x + sh_off // 2, card.y + sh_off))
+
+        # Card body — dark with subtle gradient
+        for row in range(card.height):
+            frac = row / card.height
+            r2 = int(lerp(20, 28, frac))
+            g2 = int(lerp(28, 38, frac))
+            b2 = int(lerp(48, 62, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (card.x, card.y + row), (card.right, card.y + row))
+
+        # Thick pixel border — vibrant green with inner highlight
+        pygame.draw.rect(self.screen, (55, 210, 110), card, 4)
+        pygame.draw.rect(self.screen, (30, 140, 70), card, 1)
+        # Inner glow line
+        inner = card.inflate(-8, -8)
+        pygame.draw.rect(self.screen, (40, 160, 85, 60), inner, 1)
+
+        # Corner accent blocks — bright pixel-art style
+        corner_s = 10
+        for ccx, ccy in [(card.x, card.y), (card.right - corner_s, card.y),
+                         (card.x, card.bottom - corner_s),
+                         (card.right - corner_s, card.bottom - corner_s)]:
+            pygame.draw.rect(self.screen, (255, 210, 55), (ccx, ccy, corner_s, corner_s))
+            pygame.draw.rect(self.screen, (200, 160, 30), (ccx, ccy, corner_s, corner_s), 1)
+            # highlight pixel
+            pygame.draw.rect(self.screen, (255, 240, 140), (ccx + 1, ccy + 1, 3, 3))
+
+        # ── Logo ────────────────────────────────────────────────────────
+        logo_size = 88
+        logo_x = card.x + card.width // 2 - logo_size // 2
+        logo_y = card.y + 28
+        self.draw_bytebit_logo(logo_x, logo_y, size=logo_size)
+
+        # ── BYTEBIT MARKET title ─────────────────────────────────────────
+        title_y = logo_y + logo_size + 18
+        pulse = (math.sin(t * 1.6) + 1) / 2
+        # Vibrant colour cycle: green → yellow → green
+        tr = int(lerp(55, 255, pulse))
+        tg = int(lerp(210, 245, pulse))
+        tb = int(lerp(85,  55, pulse))
+        title_col = (tr, tg, tb)
+
+        title_size = 56
+        sub_size   = 42
+
+        # Shadow stack for depth
+        for off in [4, 2]:
+            draw_text(self.screen, "BYTEBIT",
+                      (card.centerx + off, title_y + off),
+                      size=title_size, bold=True, color=(0, 0, 0), center=True)
+        draw_text(self.screen, "BYTEBIT",
+                  (card.centerx, title_y),
+                  size=title_size, bold=True, color=title_col, center=True)
+
+        sub_y = title_y + title_size + 2
+        sub_col = (255, 200, 55) if pulse > 0.5 else (255, 175, 35)
+        for off in [3, 1]:
+            draw_text(self.screen, "MARKET",
+                      (card.centerx + off, sub_y + off),
+                      size=sub_size, bold=True, color=(0, 0, 0), center=True)
+        draw_text(self.screen, "MARKET",
+                  (card.centerx, sub_y),
+                  size=sub_size, bold=True, color=sub_col, center=True)
+
+        # Tagline
+        tag_y = sub_y + sub_size + 6
+        draw_text(self.screen, "[ MODERN SUPERMARKET SIMULATOR ]",
+                  (card.centerx, tag_y),
+                  size=13, bold=True, color=(85, 185, 120), center=True)
+
+        # ── Pixel divider — alternating green/yellow blocks ─────────────
+        div_y = tag_y + 20
+        for dx in range(0, card.width - 40, 6):
+            segment = (dx // 6) % 3
+            col = (55, 210, 110) if segment == 0 else (255, 210, 55) if segment == 1 else (55, 160, 210)
+            pygame.draw.rect(self.screen, col, (card.x + 20 + dx, div_y, 4, 4))
+            pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in col),
+                             (card.x + 20 + dx, div_y + 2, 4, 2))
+
+        # ── Input fields ─────────────────────────────────────────────────
+        field_top = div_y + 16
+        field_gap = 68
+        for i, key in enumerate(["username", "email", "password"]):
+            inp = self.auth_inputs[key]
+            inp.rect.topleft = (card.x + 28, field_top + i * field_gap)
+            inp.rect.width = card.width - 56
+            inp.draw(self.screen)
+            # Vibrant thick pixel border
+            border_col = (55, 210, 110) if inp.active else (55, 90, 130)
+            pygame.draw.rect(self.screen, border_col, inp.rect, 3)
+            # Inner highlight when active
+            if inp.active:
+                inner_inp = inp.rect.inflate(-6, -6)
+                pygame.draw.rect(self.screen, (55, 210, 110, 40), inner_inp, 1)
+
+        # ── Buttons ──────────────────────────────────────────────────────
+        btn_y = field_top + 3 * field_gap + 8
+        btn_w = (card.width - 76) // 2
+        self.auth_buttons[0].base_rect = pygame.Rect(card.x + 28, btn_y, btn_w, 54)
+        self.auth_buttons[1].base_rect = pygame.Rect(card.x + 48 + btn_w, btn_y, btn_w, 54)
+
+        for i, btn in enumerate(self.auth_buttons):
+            shake_x = int(math.sin(t * 6 + i * 1.5) * 2.0 * btn.hover_t)
+            shake_y = int(math.cos(t * 5 + i) * 2.0 * btn.hover_t)
+            orig = btn.base_rect.topleft
+            btn.base_rect.x += shake_x
+            btn.base_rect.y += shake_y
+            btn.draw(self.screen)
+            btn.base_rect.topleft = orig
+
+        # ── RIGHT preview panel ──────────────────────────────────────────
+        preview = pygame.Rect(658, 78, 724, 724)
+
+        # Multi-layer shadow
+        for sh_off in [14, 9, 4]:
+            shad = pygame.Surface((preview.width, preview.height), pygame.SRCALPHA)
+            shad.fill((0, 0, 0, 25))
+            self.screen.blit(shad, (preview.x + sh_off // 2, preview.y + sh_off))
+
+        # Panel body
+        for row in range(preview.height):
+            frac = row / preview.height
+            r2 = int(lerp(16, 26, frac))
+            g2 = int(lerp(24, 36, frac))
+            b2 = int(lerp(42, 58, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (preview.x, preview.y + row), (preview.right, preview.y + row))
+
+        # Vibrant yellow-green border
+        pygame.draw.rect(self.screen, (180, 220, 60), preview, 4)
+        pygame.draw.rect(self.screen, (120, 160, 30), preview, 1)
+
+        # Corner accents — teal
+        corner_s = 10
+        for ccx, ccy in [(preview.x, preview.y), (preview.right - corner_s, preview.y),
+                         (preview.x, preview.bottom - corner_s),
+                         (preview.right - corner_s, preview.bottom - corner_s)]:
+            pygame.draw.rect(self.screen, (55, 210, 200), (ccx, ccy, corner_s, corner_s))
+            pygame.draw.rect(self.screen, (30, 150, 140), (ccx, ccy, corner_s, corner_s), 1)
+            pygame.draw.rect(self.screen, (150, 240, 230), (ccx + 1, ccy + 1, 3, 3))
+
+        self.draw_store_preview(preview)
+
+        # Blinking prompt — bright and vibrant
+        if int(t * 1.4) % 2 == 0:
+            prompt_col = (55, 230, 120)
+            # Shadow
+            draw_text(self.screen, ">> PRESS LOG IN / REGISTER TO START <<",
+                      (preview.centerx + 2, preview.bottom - 54),
+                      size=15, bold=True, color=(0, 0, 0), center=True)
+            draw_text(self.screen, ">> PRESS LOG IN / REGISTER TO START <<",
+                      (preview.centerx, preview.bottom - 56),
+                      size=15, bold=True, color=prompt_col, center=True)
 
     def draw_auth(self):
         # ---------- retro pixel background ----------
@@ -1568,574 +1800,612 @@ class App:
                       size=15, bold=True, color=(0, 0, 0), center=True)
 
     def draw_store_preview(self, rect: pygame.Rect):
-        """Final animated store preview: windows, signs, detailed fridges, stacked carts."""
-        t = self.auth_time
-        inset = rect.inflate(-20, -20)
+        """Vibrant high-quality animated store interior preview."""
+        t      = self.auth_time
+        inset  = rect.inflate(-20, -20)
         iw, ih = inset.width, inset.height
         ix, iy = inset.x, inset.y
 
-        # ── time-of-day cycle (120 s = full shift dawn→dusk) ──────────────
-        CYCLE = 120.0
-        day_frac = (t % CYCLE) / CYCLE          # 0=dawn … 1=dusk/night
+        # ── Time-of-day sky cycle ────────────────────────────────────────
+        CYCLE    = 120.0
+        day_frac = (t % CYCLE) / CYCLE
 
         def sky_col(frac):
-            # dawn(0) orange → morning(0.15) gold → day(0.35) blue
-            # → afternoon(0.6) warm → dusk(0.8) orange-red → night(1) dark
             stops = [
-                (0.00, (255, 160,  80)),   # dawn
-                (0.12, (255, 210, 120)),   # sunrise
-                (0.30, (130, 190, 255)),   # morning blue
-                (0.55, (100, 170, 240)),   # midday
-                (0.72, (255, 180,  90)),   # afternoon
-                (0.85, (220,  90,  50)),   # dusk
-                (1.00, ( 18,  20,  45)),   # night
+                (0.00, (255, 145,  65)),
+                (0.12, (255, 200, 100)),
+                (0.28, ( 90, 175, 255)),
+                (0.55, ( 65, 148, 240)),
+                (0.72, (255, 168,  72)),
+                (0.85, (210,  72,  38)),
+                (1.00, ( 12,  16,  40)),
             ]
             for i in range(len(stops) - 1):
-                f0, c0 = stops[i]
-                f1, c1 = stops[i + 1]
+                f0, c0 = stops[i]; f1, c1 = stops[i + 1]
                 if f0 <= frac <= f1:
-                    local_t = (frac - f0) / (f1 - f0)
-                    return tuple(int(lerp(c0[j], c1[j], local_t)) for j in range(3))
+                    lt = (frac - f0) / (f1 - f0)
+                    return tuple(int(lerp(c0[j], c1[j], lt)) for j in range(3))
             return stops[-1][1]
 
         sky = sky_col(day_frac)
 
-        # ── back wall (fills inset before anything else) ────────────────
-        pygame.draw.rect(self.screen, (210, 205, 195), inset)
+        # ── Rich warm wall background ────────────────────────────────────
+        for row in range(ih):
+            frac = row / ih
+            r2 = int(lerp(235, 195, frac))
+            g2 = int(lerp(225, 182, frac))
+            b2 = int(lerp(205, 162, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (ix, iy + row), (ix + iw, iy + row))
 
-        # ── windows row at top of store ────────────────────────────────
-        WIN_ROW_H = 52
-        win_zone = pygame.Rect(ix, iy, iw, WIN_ROW_H)
-        pygame.draw.rect(self.screen, (50, 55, 70), win_zone)   # wall header
+        # ── Window header — deep slate ───────────────────────────────────
+        WIN_ROW_H = 56
+        win_zone  = pygame.Rect(ix, iy, iw, WIN_ROW_H)
+        # Gradient header
+        for row in range(WIN_ROW_H):
+            frac = row / WIN_ROW_H
+            r2 = int(lerp(38, 52, frac))
+            g2 = int(lerp(44, 60, frac))
+            b2 = int(lerp(62, 80, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (ix, iy + row), (ix + iw, iy + row))
 
-        # 6 evenly spaced windows
-        n_wins = 6
-        win_w = 68
-        win_h = 38
+        # ── Windows — vivid sky with sun/moon + shading ──────────────────
+        n_wins  = 6
+        win_w   = 70; win_h = 40
         win_gap = (iw - n_wins * win_w) // (n_wins + 1)
+
         for wi in range(n_wins):
             wx = ix + win_gap + wi * (win_w + win_gap)
-            wy = iy + 7
-            # outer frame
-            pygame.draw.rect(self.screen, (80, 75, 65), (wx - 3, wy - 3, win_w + 6, win_h + 6), border_radius=4)
-            # sky gradient in window
+            wy = iy + 8
+
+            # Outer stone frame — shaded bevel
+            pygame.draw.rect(self.screen, (95, 88, 75),
+                             (wx - 4, wy - 4, win_w + 8, win_h + 8), border_radius=3)
+            pygame.draw.rect(self.screen, (70, 64, 54),
+                             (wx - 4, wy + win_h, win_w + 8, 4), border_radius=2)  # sill shd
+            pygame.draw.rect(self.screen, (130, 122, 108),
+                             (wx - 4, wy - 4, win_w + 8, 3), border_radius=2)  # top hi
+
+            # Sky gradient in window
             for row in range(win_h):
                 row_frac = row / max(1, win_h - 1)
-                base = sky
-                horizon = tuple(min(255, v + 30) for v in sky)
-                rc = tuple(int(lerp(base[j], horizon[j], row_frac)) for j in range(3))
+                horizon  = tuple(min(255, v + 35) for v in sky)
+                rc = tuple(int(lerp(sky[j], horizon[j], row_frac)) for j in range(3))
                 pygame.draw.line(self.screen, rc, (wx, wy + row), (wx + win_w - 1, wy + row))
-            # sun or moon
-            sun_x = wx + int(win_w * 0.5 + math.sin(day_frac * math.pi * 2) * win_w * 0.35)
-            sun_y = wy + int(win_h * 0.5 - math.cos(day_frac * math.pi * 2) * win_h * 0.32)
-            if day_frac < 0.82:   # sun
-                sun_col = (255, 240, 100) if day_frac < 0.65 else (255, 160, 60)
-                pygame.draw.circle(self.screen, sun_col, (sun_x, sun_y), 6)
-                # rays at midday
-                if 0.3 < day_frac < 0.6:
+
+            # Sun / moon
+            sun_x = wx + int(win_w * 0.5 + math.sin(day_frac * math.pi * 2) * win_w * 0.34)
+            sun_y = wy + int(win_h * 0.5 - math.cos(day_frac * math.pi * 2) * win_h * 0.30)
+            if day_frac < 0.82:
+                sun_c = (255, 245, 110) if day_frac < 0.65 else (255, 165, 55)
+                pygame.draw.circle(self.screen, sun_c, (sun_x, sun_y), 7)
+                pygame.draw.circle(self.screen, (255, 255, 200), (sun_x - 1, sun_y - 1), 3)
+                if 0.28 < day_frac < 0.62:
                     for ang in range(0, 360, 45):
-                        rx = int(math.cos(math.radians(ang)) * 9)
-                        ry = int(math.sin(math.radians(ang)) * 9)
-                        pygame.draw.line(self.screen, (255, 230, 80),
-                                         (sun_x, sun_y), (sun_x + rx, sun_y + ry), 1)
-            else:                 # moon
-                pygame.draw.circle(self.screen, (230, 230, 210), (sun_x, sun_y), 5)
-                pygame.draw.circle(self.screen, sky, (sun_x + 2, sun_y - 1), 4)  # crescent
-            # window frame cross-bar
-            pygame.draw.line(self.screen, (80, 75, 65), (wx + win_w // 2, wy), (wx + win_w // 2, wy + win_h), 1)
-            pygame.draw.line(self.screen, (80, 75, 65), (wx, wy + win_h // 2), (wx + win_w, wy + win_h // 2), 1)
-            # window sill
-            pygame.draw.rect(self.screen, (100, 95, 85), (wx - 4, wy + win_h, win_w + 8, 5), border_radius=2)
+                        rx2 = int(math.cos(math.radians(ang)) * 11)
+                        ry2 = int(math.sin(math.radians(ang)) * 11)
+                        pygame.draw.line(self.screen, (255, 235, 80),
+                                         (sun_x, sun_y), (sun_x + rx2, sun_y + ry2), 1)
+            else:
+                pygame.draw.circle(self.screen, (235, 235, 215), (sun_x, sun_y), 6)
+                pygame.draw.circle(self.screen, sky, (sun_x + 3, sun_y - 1), 5)
 
-        # time-of-day label on header bar
-        hour_labels = ["DAWN","MORNING","MIDDAY","AFTERNOON","DUSK","NIGHT"]
+            # Window cross-bars
+            pygame.draw.line(self.screen, (85, 78, 66),
+                             (wx + win_w // 2, wy), (wx + win_w // 2, wy + win_h), 2)
+            pygame.draw.line(self.screen, (85, 78, 66),
+                             (wx, wy + win_h // 2), (wx + win_w, wy + win_h // 2), 2)
+            # Glass shine
+            pygame.draw.line(self.screen, (255, 255, 255, 60),
+                             (wx + 2, wy + 2), (wx + 12, wy + 2), 1)
+            pygame.draw.line(self.screen, (255, 255, 255, 60),
+                             (wx + 2, wy + 2), (wx + 2, wy + 10), 1)
+            # Window sill
+            pygame.draw.rect(self.screen, (118, 110, 95),
+                             (wx - 5, wy + win_h, win_w + 10, 6), border_radius=2)
+            pygame.draw.rect(self.screen, (145, 138, 122),
+                             (wx - 5, wy + win_h, win_w + 10, 2), border_radius=1)
+
+        # Time-of-day label
+        hour_labels = ["DAWN", "MORNING", "MIDDAY", "AFTERNOON", "DUSK", "NIGHT"]
         hour_idx = min(5, int(day_frac * 6))
-        tod_lbl = get_font(9, bold=True).render(hour_labels[hour_idx], True, (200, 210, 220))
-        self.screen.blit(tod_lbl, (ix + iw - tod_lbl.get_width() - 6, iy + WIN_ROW_H - 14))
+        tod_lbl  = get_font(9, bold=True).render(hour_labels[hour_idx], True, (200, 215, 228))
+        self.screen.blit(tod_lbl, (ix + iw - tod_lbl.get_width() - 8, iy + WIN_ROW_H - 16))
 
-        # ── floor (tile grid, extends to bottom) ──────────────────────
+        # ── Floor — warm tile grid with depth ───────────────────────────
         floor_y = iy + WIN_ROW_H
-        pygame.draw.rect(self.screen, FLOOR, (ix, floor_y, iw, ih - WIN_ROW_H))
-        tile = 28
-        for gx in range(ix, inset.right, tile):
-            pygame.draw.line(self.screen, AISLE, (gx, floor_y), (gx, inset.bottom), 1)
-        for gy in range(floor_y, inset.bottom, tile):
-            pygame.draw.line(self.screen, AISLE, (ix, gy), (inset.right, gy), 1)
+        # Floor base — warm cream gradient
+        for row in range(ih - WIN_ROW_H):
+            frac = row / max(1, ih - WIN_ROW_H)
+            r2 = int(lerp(205, 180, frac))
+            g2 = int(lerp(198, 172, frac))
+            b2 = int(lerp(178, 152, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (ix, floor_y + row), (ix + iw, floor_y + row))
 
-        # ── overhead sign helper ────────────────────────────────────
+        # Tile grid — slightly darker warm lines
+        tile = 30
+        for gx2 in range(ix, ix + iw, tile):
+            pygame.draw.line(self.screen, (170, 160, 138, 80),
+                             (gx2, floor_y), (gx2, iy + ih), 1)
+        for gy2 in range(floor_y, iy + ih, tile):
+            pygame.draw.line(self.screen, (170, 160, 138, 80),
+                             (ix, gy2), (ix + iw, gy2), 1)
+
+        # Overhead light shafts — warm ceiling lights
+        for lx in range(ix + 60, ix + iw - 40, 130):
+            light_surf = pygame.Surface((60, ih - WIN_ROW_H), pygame.SRCALPHA)
+            flicker_a  = int(12 + 8 * math.sin(t * 2.8 + lx))
+            pygame.draw.rect(light_surf, (255, 245, 200, flicker_a), light_surf.get_rect())
+            self.screen.blit(light_surf, (lx, floor_y))
+            # Ceiling light fixture
+            pygame.draw.rect(self.screen, (235, 230, 215), (lx + 5, floor_y, 50, 5))
+            pygame.draw.rect(self.screen, (255, 252, 235), (lx + 8, floor_y, 44, 2))
+
+        # ── Shelf drawing helper — rich wood with bevel ──────────────────
         font_sec  = get_font(10, bold=True)
         font_sign = get_font(11, bold=True)
 
-        def draw_overhead_sign(cx, sign_y, text, bg_col, text_col=(255, 245, 200)):
+        def draw_overhead_sign(cx, sign_y2, text, bg_col, text_col=(255, 245, 200)):
             lbl = font_sign.render(text, True, text_col)
-            pad = 8
-            sw, sh = lbl.get_width() + pad * 2, lbl.get_height() + 6
-            sx = cx - sw // 2
-            # hanging wire
-            pygame.draw.line(self.screen, (120, 120, 130), (cx, sign_y - 10), (cx, sign_y), 1)
-            # sign body
-            pygame.draw.rect(self.screen, bg_col, (sx, sign_y, sw, sh), border_radius=4)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in bg_col),
-                             (sx, sign_y, sw, sh), 2, border_radius=4)
-            self.screen.blit(lbl, (sx + pad, sign_y + 3))
+            pad = 9
+            sw2 = lbl.get_width() + pad * 2
+            sh2 = lbl.get_height() + 8
+            sx2 = cx - sw2 // 2
+            # Wire
+            pygame.draw.line(self.screen, (140, 132, 118), (cx, sign_y2 - 12), (cx, sign_y2), 1)
+            # Sign body with gradient
+            pygame.draw.rect(self.screen, bg_col, (sx2, sign_y2, sw2, sh2), border_radius=5)
+            hi_col2 = tuple(min(255, v + 50) for v in bg_col)
+            pygame.draw.rect(self.screen, hi_col2, (sx2 + 2, sign_y2 + 1, sw2 - 4, 3), border_radius=3)
+            shd_col = tuple(max(0, v - 45) for v in bg_col)
+            pygame.draw.rect(self.screen, shd_col, (sx2, sign_y2, sw2, sh2), 2, border_radius=5)
+            self.screen.blit(lbl, (sx2 + pad, sign_y2 + 4))
 
-        # ── section layout ───────────────────────────────────────────────
-        # Sections spread at 9/29/53/79 % of inset width.
-        # Corridors (chars at 0.19 / 0.41 / 0.66 / 0.91) are each ≥ 40 px clear
-        # so characters walk freely without touching any shelf edge.
+        def draw_shelf_unit(sx, sy, sw, sh, products, layers=3):
+            # Rich dark wood body
+            wood_hi  = (165, 112, 52)
+            wood_mid = (138, 90, 38)
+            wood_shd = (105, 65, 25)
+            # Main body gradient
+            for row in range(sh):
+                frac = row / sh
+                r2 = int(lerp(wood_hi[0], wood_shd[0], frac))
+                g2 = int(lerp(wood_hi[1], wood_shd[1], frac))
+                b2 = int(lerp(wood_hi[2], wood_shd[2], frac))
+                pygame.draw.line(self.screen, (r2, g2, b2),
+                                 (sx, sy + row), (sx + sw, sy + row))
+            # Right side shadow
+            pygame.draw.rect(self.screen, wood_shd, (sx + sw - 7, sy, 7, sh))
+            # Left highlight edge
+            pygame.draw.rect(self.screen, wood_hi, (sx, sy, 3, sh))
+
+            layer_h = sh // (layers + 1)
+            for li in range(layers):
+                plank_y = sy + layer_h * (li + 1)
+                # Plank — shaded bevel
+                pygame.draw.rect(self.screen, (195, 155, 85), (sx + 3, plank_y, sw - 10, 9), border_radius=2)
+                pygame.draw.rect(self.screen, (215, 182, 108), (sx + 3, plank_y, sw - 10, 3), border_radius=2)
+                pygame.draw.rect(self.screen, (148, 112, 55), (sx + 3, plank_y + 6, sw - 10, 3))
+                # Products on plank
+                slot_w = max(1, (sw - 14) // max(1, len(products)))
+                for pi, (pcol, _) in enumerate(products):
+                    shimmer = int(math.sin(t * 1.8 + sx * 0.015 + pi + li) * 12)
+                    c = tuple(min(255, v + shimmer) for v in pcol)
+                    hi = tuple(min(255, v + 55) for v in c)
+                    shd2 = tuple(max(0, v - 35) for v in c)
+                    px_x = sx + 7 + pi * slot_w
+                    # Product body
+                    pygame.draw.rect(self.screen, c,
+                                     (px_x, plank_y - 20, slot_w - 2, 20), border_radius=2)
+                    # Highlight top
+                    pygame.draw.rect(self.screen, hi,
+                                     (px_x, plank_y - 20, slot_w - 2, 5), border_radius=2)
+                    # Shadow bottom
+                    pygame.draw.rect(self.screen, shd2,
+                                     (px_x, plank_y - 6, slot_w - 2, 6), border_radius=1)
+                    # Price tag
+                    pygame.draw.rect(self.screen, (255, 248, 180),
+                                     (px_x, plank_y - 4, slot_w - 2, 4))
+
+        # ── Section positions ─────────────────────────────────────────────
         SEC_GROCERY_CX = ix + int(iw * 0.09)
         SEC_FROZEN_CX  = ix + int(iw * 0.29)
         SEC_DELI_CX    = ix + int(iw * 0.53)
         SEC_TECH_CX    = ix + int(iw * 0.79)
-        SIGN_Y         = floor_y + 4
-        # Shelves stop well above the entrance mat / register area
-        SHELF_STOP_Y   = inset.bottom - 120
+        SIGN_Y         = floor_y + 5
+        SHELF_STOP_Y   = inset.bottom - 118
 
-        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY",  (60, 120, 60))
-        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",   (30, 90, 160))
-        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",     (160, 80, 40))
-        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",     (40, 40, 100))
+        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (48, 148, 52))
+        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (28, 88, 185))
+        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",    (175, 72, 28))
+        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",    (45, 45, 128))
 
-        CONTENT_Y = floor_y + 32   # everything below signs starts here
+        CONTENT_Y = floor_y + 34
 
-        # ── helper: shelf unit ─────────────────────────────────────────
-        def draw_shelf_unit(sx, sy, sw, sh, products, layers=3):
-            pygame.draw.rect(self.screen, WOOD, (sx, sy, sw, sh), border_radius=5)
-            # side shadow strip
-            pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in WOOD),
-                             (sx + sw - 6, sy, 6, sh), border_radius=5)
-            layer_h = sh // (layers + 1)
-            for li in range(layers):
-                plank_y = sy + layer_h * (li + 1)
-                pygame.draw.rect(self.screen, SHELF, (sx + 4, plank_y, sw - 10, 8), border_radius=2)
-                # underside shadow
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in SHELF),
-                                 (sx + 4, plank_y + 7, sw - 10, 2))
-                slot_w = max(1, (sw - 12) // max(1, len(products)))
-                for pi, (pcol, _) in enumerate(products):
-                    shimmer = int(math.sin(t * 2.0 + sx * 0.02 + pi + li) * 8)
-                    c = tuple(min(255, v + shimmer) for v in pcol)
-                    pygame.draw.rect(self.screen, c,
-                                     (sx + 6 + pi * slot_w, plank_y - 19, slot_w - 1, 19), border_radius=2)
-                    # price tag
-                    pygame.draw.rect(self.screen, (255, 250, 180),
-                                     (sx + 6 + pi * slot_w, plank_y - 3, slot_w - 1, 3))
-
-        # ── SECTION 1: Grocery — single shelf unit ─────────────────────
+        # ── SECTION 1: Grocery shelves ───────────────────────────────────
         grocery_products = [
-            ((245, 180, 80), "chips"), ((195, 225, 255), "milk"),
-            ((214, 169, 111), "bread"), ((232, 86, 86), "apple"),
+            ((245, 185, 65), "chips"), ((185, 225, 255), "milk"),
+            ((218, 165, 95), "bread"), ((238, 72, 72), "apple"),
         ]
-        shelf_w = 52
-        grocery_h = SHELF_STOP_Y - CONTENT_Y
-        # ONE shelf only — centred on SEC_GROCERY_CX
-        draw_shelf_unit(SEC_GROCERY_CX - shelf_w // 2, CONTENT_Y, shelf_w, grocery_h, grocery_products, layers=4)
+        draw_shelf_unit(SEC_GROCERY_CX - 28, CONTENT_Y, 56, SHELF_STOP_Y - CONTENT_Y,
+                        grocery_products, layers=4)
 
-        # ── SECTION 2: Frozen refrigerators ────────────────────────────
+        # ── SECTION 2: Frozen fridges — detailed glass units ─────────────
         frozen_defs = [
-            ((160, 210, 255), "Frz.Fruit"),
-            ((180, 240, 200), "Frz.Veg"),
-            ((255, 200, 180), "Frz.Prot"),
+            ((148, 208, 255), "Fruit"),
+            ((165, 242, 192), "Veg  "),
+            ((255, 195, 172), "Prot "),
         ]
-        fridge_w, fridge_h = 46, SHELF_STOP_Y - CONTENT_Y
-        fridge_gap = 5
+        fridge_w = 48; fridge_h = SHELF_STOP_Y - CONTENT_Y; fridge_gap = 6
         frozen_x0 = SEC_FROZEN_CX - (len(frozen_defs) * (fridge_w + fridge_gap)) // 2 + fridge_gap
+
         for fi, (fcol, fname) in enumerate(frozen_defs):
             fx = frozen_x0 + fi * (fridge_w + fridge_gap)
             fy = CONTENT_Y
+            CASE_HI  = (58, 95, 145)
+            CASE_MID = (42, 72, 112)
+            CASE_SHD = (28, 50, 82)
+            # Case gradient
+            for row in range(fridge_h):
+                frac = row / fridge_h
+                r2 = int(lerp(CASE_HI[0], CASE_SHD[0], frac))
+                g2 = int(lerp(CASE_HI[1], CASE_SHD[1], frac))
+                b2 = int(lerp(CASE_HI[2], CASE_SHD[2], frac))
+                pygame.draw.line(self.screen, (r2, g2, b2),
+                                 (fx, fy + row), (fx + fridge_w, fy + row))
+            # Edge shadows/highlights
+            pygame.draw.rect(self.screen, CASE_SHD, (fx, fy, 5, fridge_h))
+            pygame.draw.rect(self.screen, CASE_SHD, (fx + fridge_w - 5, fy, 5, fridge_h))
+            pygame.draw.rect(self.screen, (72, 118, 172), (fx, fy, fridge_w, 9), border_radius=4)
+            pygame.draw.rect(self.screen, (88, 138, 192), (fx, fy, fridge_w, 3), border_radius=4)
+            pygame.draw.rect(self.screen, CASE_SHD, (fx, fy + fridge_h - 9, fridge_w, 9), border_radius=3)
 
-            # ── outer casing ──────────────────────────────────────────
-            CASE_COL  = (44, 74, 108)
-            CASE_DARK = (30, 52, 80)
-            pygame.draw.rect(self.screen, CASE_COL, (fx, fy, fridge_w, fridge_h), border_radius=5)
-            # left/right edge shading
-            pygame.draw.rect(self.screen, CASE_DARK, (fx, fy, 5, fridge_h), border_radius=5)
-            pygame.draw.rect(self.screen, CASE_DARK, (fx + fridge_w - 5, fy, 5, fridge_h), border_radius=5)
-            # top cap
-            pygame.draw.rect(self.screen, (60, 100, 145), (fx, fy, fridge_w, 8), border_radius=5)
-            # bottom kick plate
-            pygame.draw.rect(self.screen, (30, 50, 75), (fx, fy + fridge_h - 8, fridge_w, 8), border_radius=3)
+            # Glass door
+            GLASS_M = 6
+            gx3 = fx + GLASS_M; gy3 = fy + 11
+            gw3 = fridge_w - GLASS_M * 2; gh3 = fridge_h - 24
+            glass_s = pygame.Surface((gw3, gh3), pygame.SRCALPHA)
+            glass_s.fill((215, 242, 255, 48))
+            self.screen.blit(glass_s, (gx3, gy3))
+            pygame.draw.rect(self.screen, (68, 108, 158), (gx3, gy3, gw3, gh3), 2, border_radius=3)
+            # Glass shine
+            pygame.draw.line(self.screen, (255, 255, 255, 80),
+                             (gx3 + 2, gy3 + 2), (gx3 + 2, gy3 + 18), 1)
+            pygame.draw.line(self.screen, (255, 255, 255, 80),
+                             (gx3 + 2, gy3 + 2), (gx3 + gw3 - 4, gy3 + 2), 1)
 
-            # ── glass door panel — lighter tint so items show clearly ──
-            GLASS_MARGIN = 6
-            gx2, gy2 = fx + GLASS_MARGIN, fy + 10
-            gw2, gh2 = fridge_w - GLASS_MARGIN * 2, fridge_h - 22
-            # glass base — semi-transparent pale blue (not too dark)
-            glass_surf = pygame.Surface((gw2, gh2), pygame.SRCALPHA)
-            glass_surf.fill((200, 235, 255, 55))
-            self.screen.blit(glass_surf, (gx2, gy2))
-            # glass door frame
-            pygame.draw.rect(self.screen, (55, 90, 130), (gx2, gy2, gw2, gh2), 2, border_radius=3)
-
-            # ── products CLEARLY visible through glass ──────────────────
+            # Products inside
             item_rows = 4
-            row_h = (gh2 - 8) // item_rows
+            row_h3 = (gh3 - 8) // item_rows
             for ri in range(item_rows):
-                ry2 = gy2 + 4 + ri * row_h
-                # shelf plank inside fridge
-                pygame.draw.rect(self.screen, (60, 100, 140), (gx2 + 2, ry2 + row_h - 4, gw2 - 4, 4))
-                # item block — bright, saturated color
-                shimmer = int(math.sin(t * 1.8 + fi * 2 + ri) * 6)
+                ry3 = gy3 + 4 + ri * row_h3
+                pygame.draw.rect(self.screen, (62, 105, 155),
+                                 (gx3 + 2, ry3 + row_h3 - 5, gw3 - 4, 5))
+                shimmer = int(math.sin(t * 1.6 + fi * 2 + ri) * 14)
                 ic = tuple(min(255, v + shimmer) for v in fcol)
-                pygame.draw.rect(self.screen, ic, (gx2 + 3, ry2 + 2, gw2 - 6, row_h - 8), border_radius=2)
-                # item outline for clarity
+                hi_ic = tuple(min(255, v + 55) for v in ic)
+                pygame.draw.rect(self.screen, ic,
+                                 (gx3 + 3, ry3 + 2, gw3 - 6, row_h3 - 8), border_radius=2)
+                pygame.draw.rect(self.screen, hi_ic,
+                                 (gx3 + 3, ry3 + 2, gw3 - 6, 4), border_radius=2)
                 pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in ic),
-                                 (gx2 + 3, ry2 + 2, gw2 - 6, row_h - 8), 1, border_radius=2)
-                # price sticker
-                pygame.draw.rect(self.screen, (255, 250, 180), (gx2 + 3, ry2 + row_h - 9, gw2 - 6, 4))
-                # tiny label
-                item_lbl = font_sec.render(fname[:4], True, (40, 40, 60))
-                self.screen.blit(item_lbl, (gx2 + max(1, gw2 // 2 - item_lbl.get_width() // 2), ry2 + 3))
+                                 (gx3 + 3, ry3 + 2, gw3 - 6, row_h3 - 8), 1, border_radius=2)
+                pygame.draw.rect(self.screen, (255, 248, 180),
+                                 (gx3 + 3, ry3 + row_h3 - 10, gw3 - 6, 4))
+                lbl2 = font_sec.render(fname[:4], True, (35, 38, 62))
+                self.screen.blit(lbl2, (gx3 + max(1, gw3 // 2 - lbl2.get_width() // 2), ry3 + 3))
 
-            # ── door handle (vertical bar, right side) ──────────────
-            hx = fx + fridge_w - GLASS_MARGIN - 4
-            pygame.draw.rect(self.screen, (180, 190, 200), (hx, fy + fridge_h // 2 - 20, 5, 40), border_radius=3)
-            for screw_y in [fy + fridge_h // 2 - 20, fy + fridge_h // 2 + 18]:
-                pygame.draw.circle(self.screen, (140, 150, 160), (hx + 2, screw_y), 2)
+            # Door handle
+            hx2 = fx + fridge_w - GLASS_M - 5
+            pygame.draw.rect(self.screen, (195, 205, 218),
+                             (hx2, fy + fridge_h // 2 - 22, 6, 44), border_radius=3)
+            pygame.draw.rect(self.screen, (225, 232, 242),
+                             (hx2 + 1, fy + fridge_h // 2 - 22, 2, 44), border_radius=2)
+            # LED temp display
+            led_x2 = fx + 8; led_y2 = fy + 2
+            pygame.draw.rect(self.screen, (8, 18, 32),
+                             (led_x2, led_y2, fridge_w - 16, 8), border_radius=2)
+            tglow = int((math.sin(t * 2.0 + fi) + 1) * 5)
+            pygame.draw.rect(self.screen, (0, min(255, 188 + tglow), 88),
+                             (led_x2 + 2, led_y2 + 2, 20, 4), border_radius=1)
 
-            # ── temperature display (LED panel top) ─────────────────
-            led_x, led_y = fx + 8, fy + 1
-            pygame.draw.rect(self.screen, (10, 20, 35), (led_x, led_y, fridge_w - 16, 7), border_radius=2)
-            temp_glow = int((math.sin(t * 2.0 + fi) + 1) * 4)
-            pygame.draw.rect(self.screen, (0, min(255, 180 + temp_glow), 80),
-                             (led_x + 2, led_y + 1, 18, 5), border_radius=1)
+        # ── SECTION 3: Deli counter ──────────────────────────────────────
+        deli_w  = 80; deli_x0 = SEC_DELI_CX - deli_w // 2
+        BACK_H  = SHELF_STOP_Y - CONTENT_Y
+        # Warm wood back shelf
+        for row in range(BACK_H):
+            frac = row / BACK_H
+            r2 = int(lerp(185, 148, frac))
+            g2 = int(lerp(148, 112, frac))
+            b2 = int(lerp(105, 78, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (deli_x0, CONTENT_Y + row), (deli_x0 + deli_w, CONTENT_Y + row))
 
-        # ── SECTION 3: Deli counter ─────────────────────────────────────
-        deli_w  = 78
-        deli_x0 = SEC_DELI_CX - deli_w // 2
-        # back shelf tiers — stop at SHELF_STOP_Y
-        BACK_H = SHELF_STOP_Y - CONTENT_Y
-        back_shelf_col = (170, 140, 100)
-        pygame.draw.rect(self.screen, back_shelf_col, (deli_x0, CONTENT_Y, deli_w, BACK_H), border_radius=4)
         deli_items = [
-            ((214, 169, 111), "Bread"),
-            ((255, 200, 120), "Donut"),
-            ((210, 140, 160), "Cake"),
+            ((218, 172, 105), "Bread"),
+            ((255, 198, 108), "Donut"),
+            ((218, 135, 162), "Cake"),
         ]
-        tier_rows = 4
-        tier_h = BACK_H // (tier_rows + 1)
+        tier_rows = 4; tier_h = BACK_H // (tier_rows + 1)
         for tr in range(tier_rows):
-            ty2 = CONTENT_Y + tier_h * (tr + 1)
-            pygame.draw.rect(self.screen, (200, 170, 125), (deli_x0 + 3, ty2, deli_w - 6, 5), border_radius=2)
+            ty3 = CONTENT_Y + tier_h * (tr + 1)
+            pygame.draw.rect(self.screen, (210, 175, 122), (deli_x0 + 2, ty3, deli_w - 4, 6), border_radius=2)
+            pygame.draw.rect(self.screen, (228, 198, 148), (deli_x0 + 2, ty3, deli_w - 4, 2), border_radius=2)
             for tpi in range(3):
                 tcol, _ = deli_items[tpi % len(deli_items)]
-                shimmer = int(math.sin(t * 1.5 + tr + tpi) * 8)
+                shimmer = int(math.sin(t * 1.4 + tr + tpi) * 12)
                 tc = tuple(min(255, v + shimmer) for v in tcol)
-                pygame.draw.ellipse(self.screen, tc,
-                                    (deli_x0 + 6 + tpi * 22, ty2 - 14, 20, 13))
-        # glass display counter (front)
-        COUNTER_H = 55
-        counter_y2 = CONTENT_Y + BACK_H - COUNTER_H - 2
-        pygame.draw.rect(self.screen, (160, 130, 95), (deli_x0, counter_y2 + 20, deli_w, COUNTER_H), border_radius=5)
-        # glass front panel
-        pygame.draw.rect(self.screen, (170, 210, 245), (deli_x0 + 2, counter_y2, deli_w - 4, 24), border_radius=3)
-        pygame.draw.rect(self.screen, (120, 175, 220), (deli_x0 + 2, counter_y2, deli_w - 4, 24), 2, border_radius=3)
-        # items inside glass case
+                hi3 = tuple(min(255, v + 50) for v in tc)
+                cx3 = deli_x0 + 7 + tpi * 23
+                pygame.draw.ellipse(self.screen, tc, (cx3, ty3 - 15, 21, 14))
+                pygame.draw.ellipse(self.screen, hi3, (cx3 + 2, ty3 - 14, 8, 5))
+
+        # Glass display counter
+        COUNTER_H = 58
+        counter_y3 = CONTENT_Y + BACK_H - COUNTER_H - 2
+        for row in range(COUNTER_H):
+            frac = row / COUNTER_H
+            r2 = int(lerp(172, 138, frac))
+            g2 = int(lerp(138, 108, frac))
+            b2 = int(lerp(100, 75, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (deli_x0, counter_y3 + 20 + min(row, COUNTER_H - 20)),
+                             (deli_x0 + deli_w, counter_y3 + 20 + min(row, COUNTER_H - 20)))
+
+        # Glass front
+        glass2 = pygame.Surface((deli_w - 4, 26), pygame.SRCALPHA)
+        glass2.fill((175, 218, 252, 72))
+        self.screen.blit(glass2, (deli_x0 + 2, counter_y3))
+        pygame.draw.rect(self.screen, (125, 182, 228), (deli_x0 + 2, counter_y3, deli_w - 4, 26), 2, border_radius=3)
+        pygame.draw.line(self.screen, (215, 238, 255),
+                         (deli_x0 + 4, counter_y3 + 2), (deli_x0 + deli_w - 6, counter_y3 + 2), 1)
+
         for di, (dcol, dname) in enumerate(deli_items):
-            ddx = deli_x0 + 6 + di * 22
-            pygame.draw.ellipse(self.screen, dcol, (ddx, counter_y2 + 5, 20, 13))
-            dlbl = get_font(8).render(dname, True, (70, 50, 30))
-            self.screen.blit(dlbl, (ddx + 10 - dlbl.get_width() // 2, counter_y2 + 20))
-        # counter top surface
-        pygame.draw.rect(self.screen, (200, 175, 130), (deli_x0, counter_y2 + 18, deli_w, 6), border_radius=2)
+            ddx = deli_x0 + 5 + di * 23
+            pygame.draw.ellipse(self.screen, dcol, (ddx, counter_y3 + 5, 21, 14))
+            pygame.draw.ellipse(self.screen, tuple(min(255, v + 45) for v in dcol),
+                                (ddx + 2, counter_y3 + 6, 8, 5))
+            dlbl = get_font(8).render(dname, True, (72, 48, 28))
+            self.screen.blit(dlbl, (ddx + 10 - dlbl.get_width() // 2, counter_y3 + 21))
+        pygame.draw.rect(self.screen, (215, 185, 135), (deli_x0, counter_y3 + 18, deli_w, 7), border_radius=2)
+        pygame.draw.rect(self.screen, (235, 210, 160), (deli_x0, counter_y3 + 18, deli_w, 2), border_radius=1)
 
-        # ── SECTION 4: Tech display aisles ────────────────────────────
-        # Three shelf aisles, each stocking all three device types stacked vertically.
-        # The whole section is shorter than the other sections (stops higher up).
-        TECH_STOP_Y  = SHELF_STOP_Y - 80        # tech ends noticeably shorter
+        # ── SECTION 4: Tech aisles ───────────────────────────────────────
+        TECH_STOP_Y  = SHELF_STOP_Y - 78
         tech_aisle_h = TECH_STOP_Y - CONTENT_Y
-
-        # Aisle shelf definitions: 3 aisles, each with phone + laptop + router stacked
-        tech_aisles = [
-            (-68, "AISLE A"),
-            (  0, "AISLE B"),
-            ( 68, "AISLE C"),
-        ]
-        # Device types shown on every shelf aisle (stacked top-to-bottom)
+        tech_aisles  = [(-70, "AISLE A"), (0, "AISLE B"), (70, "AISLE C")]
         tech_device_rows = [
-            # (body_col,         screen_col,       name,    w,  h)
-            ((55,  55,  68),  (90,  170, 255), "PHONE",  13, 22),
-            ((38,  38,  48),  (130, 215, 255), "LAPTOP", 36, 24),
-            ((175, 175, 195), (70,  190, 255), "ROUTER", 26, 17),
+            ((52, 52, 65),  (88, 172, 255), "PHONE",  14, 23),
+            ((36, 36, 46),  (128, 218, 255), "LAPTOP", 38, 25),
+            ((172, 172, 192), (68, 192, 255), "ROUTER", 28, 18),
         ]
+        for ai, (ax_off, _) in enumerate(tech_aisles):
+            shelf_ax = SEC_TECH_CX + ax_off; shelf_aw = 54
+            # Dark carbon-fibre style shelf
+            for row in range(tech_aisle_h):
+                frac = row / tech_aisle_h
+                shade = int(lerp(62, 42, frac))
+                pygame.draw.line(self.screen, (shade, shade - 4, shade + 8),
+                                 (shelf_ax - shelf_aw // 2, CONTENT_Y + row),
+                                 (shelf_ax + shelf_aw // 2, CONTENT_Y + row))
+            # Right edge shadow + left highlight
+            pygame.draw.rect(self.screen, (28, 24, 38),
+                             (shelf_ax + shelf_aw // 2 - 7, CONTENT_Y, 7, tech_aisle_h))
+            pygame.draw.rect(self.screen, (85, 82, 105),
+                             (shelf_ax - shelf_aw // 2, CONTENT_Y, 3, tech_aisle_h))
 
-        for ai, (ax_off, alabel) in enumerate(tech_aisles):
-            # shelf unit background
-            shelf_ax = SEC_TECH_CX + ax_off
-            shelf_aw = 52
-            pygame.draw.rect(self.screen, WOOD,
-                             (shelf_ax - shelf_aw // 2, CONTENT_Y, shelf_aw, tech_aisle_h),
-                             border_radius=4)
-            # side shadow
-            pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in WOOD),
-                             (shelf_ax + shelf_aw // 2 - 6, CONTENT_Y, 6, tech_aisle_h),
-                             border_radius=4)
-
-            # evenly distribute device rows along the shelf height
-            num_rows = len(tech_device_rows)
-            row_zone_h = tech_aisle_h // (num_rows + 1)
+            num_rows3 = len(tech_device_rows)
+            row_zone  = tech_aisle_h // (num_rows3 + 1)
 
             for ri, (bcol, scol, dname, dw, dh) in enumerate(tech_device_rows):
-                # shelf plank between rows
-                plank_y = CONTENT_Y + row_zone_h * (ri + 1)
-                pygame.draw.rect(self.screen, SHELF,
-                                 (shelf_ax - shelf_aw // 2 + 3, plank_y, shelf_aw - 6, 7),
-                                 border_radius=2)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in SHELF),
-                                 (shelf_ax - shelf_aw // 2 + 3, plank_y + 6, shelf_aw - 6, 2))
+                plank_y = CONTENT_Y + row_zone * (ri + 1)
+                # Plank — bright chrome
+                pygame.draw.rect(self.screen, (138, 145, 162),
+                                 (shelf_ax - shelf_aw // 2 + 3, plank_y, shelf_aw - 6, 8), border_radius=2)
+                pygame.draw.rect(self.screen, (175, 182, 198),
+                                 (shelf_ax - shelf_aw // 2 + 3, plank_y, shelf_aw - 6, 3), border_radius=2)
+                pygame.draw.rect(self.screen, (105, 110, 125),
+                                 (shelf_ax - shelf_aw // 2 + 3, plank_y + 5, shelf_aw - 6, 3))
 
-                # device centred above its plank
-                tx2 = shelf_ax - dw // 2
-                ty2 = plank_y - dh - 4
+                tx3 = shelf_ax - dw // 2; ty3 = plank_y - dh - 5
+                sglow = int((math.sin(t * 2.5 + ai * 1.2 + ri * 0.8) + 1) * 18)
 
-                sglow = int((math.sin(t * 2.8 + ai * 1.1 + ri * 0.9) + 1) * 12)
+                # Vibrant glow halo
+                halo = pygame.Surface((dw + 16, dh + 16), pygame.SRCALPHA)
+                glow_col = tuple(min(255, v + sglow) for v in scol)
+                pygame.draw.rect(halo, (*glow_col, 55 + sglow // 2),
+                                 halo.get_rect(), border_radius=6)
+                self.screen.blit(halo, (tx3 - 8, ty3 - 8))
 
-                # glow halo
-                halo_surf = pygame.Surface((dw + 10, dh + 10), pygame.SRCALPHA)
-                pygame.draw.rect(halo_surf, (*scol, 35 + sglow),
-                                 halo_surf.get_rect(), border_radius=5)
-                self.screen.blit(halo_surf, (tx2 - 5, ty2 - 5))
+                # Device body with shading
+                pygame.draw.rect(self.screen, bcol, (tx3, ty3, dw, dh), border_radius=3)
+                hi_body = tuple(min(255, v + 28) for v in bcol)
+                pygame.draw.rect(self.screen, hi_body, (tx3, ty3, dw, 5), border_radius=3)
+                shd_body = tuple(max(0, v - 18) for v in bcol)
+                pygame.draw.rect(self.screen, shd_body, (tx3, ty3 + dh - 5, dw, 5), border_radius=3)
 
-                # device body
-                pygame.draw.rect(self.screen, bcol, (tx2, ty2, dw, dh), border_radius=3)
-                # screen bezel
-                pygame.draw.rect(self.screen, (20, 20, 30),
-                                 (tx2 + 2, ty2 + 2, dw - 4, dh - 5), border_radius=2)
-                # screen glow
-                sc2 = tuple(min(255, v + sglow) for v in scol)
-                pygame.draw.rect(self.screen, sc2,
-                                 (tx2 + 3, ty2 + 3, dw - 6, dh - 8), border_radius=2)
-                # UI bars on screen
+                # Screen
+                pygame.draw.rect(self.screen, (15, 18, 28),
+                                 (tx3 + 2, ty3 + 2, dw - 4, dh - 5), border_radius=2)
+                sc3 = tuple(min(255, v + sglow) for v in scol)
+                pygame.draw.rect(self.screen, sc3,
+                                 (tx3 + 3, ty3 + 3, dw - 6, dh - 8), border_radius=2)
+                # Screen shine
+                pygame.draw.line(self.screen, (255, 255, 255, 100),
+                                 (tx3 + 4, ty3 + 4), (tx3 + dw - 6, ty3 + 4), 1)
+                # UI bars
                 for bar_i in range(2):
-                    bar_y2 = ty2 + 5 + bar_i * 5
-                    bar_col = (255, 255, 255) if (int(t * 2 + bar_i + ri) % 4 < 2) else (180, 220, 255)
-                    pygame.draw.rect(self.screen, bar_col,
-                                     (tx2 + 4, bar_y2, dw - 10, 2), border_radius=1)
-                # device outline
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in bcol),
-                                 (tx2, ty2, dw, dh), 1, border_radius=3)
-                # tiny device name label on plank
-                dlbl = font_sec.render(dname, True, (190, 200, 220))
-                self.screen.blit(dlbl, (tx2 + dw // 2 - dlbl.get_width() // 2, plank_y + 8))
+                    bar_y3 = ty3 + 5 + bar_i * 5
+                    bar_c  = (255, 255, 255) if (int(t * 2.2 + bar_i + ri) % 4 < 2) else (180, 225, 255)
+                    pygame.draw.rect(self.screen, bar_c,
+                                     (tx3 + 4, bar_y3, dw - 10, 2), border_radius=1)
+                pygame.draw.rect(self.screen, tuple(max(0, v - 22) for v in bcol),
+                                 (tx3, ty3, dw, dh), 1, border_radius=3)
 
-            # price tag strip at the very bottom of each aisle
-            pygame.draw.rect(self.screen, (255, 250, 180),
-                             (shelf_ax - shelf_aw // 2 + 3, TECH_STOP_Y - 10, shelf_aw - 6, 6),
+                dlbl = font_sec.render(dname, True, (195, 205, 225))
+                self.screen.blit(dlbl, (tx3 + dw // 2 - dlbl.get_width() // 2, plank_y + 9))
+
+            # Price strip
+            pygame.draw.rect(self.screen, (255, 248, 180),
+                             (shelf_ax - shelf_aw // 2 + 3, TECH_STOP_Y - 11, shelf_aw - 6, 7),
                              border_radius=2)
 
-        # ── checkout counter ───────────────────────────────────────────
-        counter_rect = pygame.Rect(inset.right - 165, inset.bottom - 120, 130, 78)
-        pygame.draw.rect(self.screen, REGISTER, counter_rect, border_radius=7)
-        pygame.draw.rect(self.screen, (55, 65, 75), counter_rect, 2, border_radius=7)
-        # register screen
-        scr_glow = int((math.sin(t * 3.0) + 1) * 18)
-        pygame.draw.rect(self.screen, (0, min(255, 150 + scr_glow), min(255, 55 + scr_glow)),
-                         (counter_rect.x + 7, counter_rect.y + 7, 44, 28), border_radius=3)
-        # scanner laser line sweep
-        laser_y = counter_rect.y + 42 + int(math.sin(t * 6) * 5)
-        pygame.draw.line(self.screen, (255, 60, 60),
-                         (counter_rect.x + 54, laser_y),
-                         (counter_rect.right - 7, laser_y), 2)
-        # conveyor belt stripes
-        belt_x = counter_rect.x + 54
-        for stripe in range(5):
-            sx2 = belt_x + stripe * 13 + int(t * 18) % 13
-            pygame.draw.line(self.screen, (70, 75, 80),
-                             (sx2, counter_rect.y + 36), (sx2, counter_rect.y + 60), 2)
+        # ── Checkout register — polished dark unit ───────────────────────
+        counter_rect = pygame.Rect(inset.right - 168, inset.bottom - 122, 132, 80)
+        # Body gradient
+        for row in range(counter_rect.height):
+            frac = row / counter_rect.height
+            r2 = int(lerp(55, 38, frac))
+            g2 = int(lerp(68, 48, frac))
+            b2 = int(lerp(82, 58, frac))
+            pygame.draw.line(self.screen, (r2, g2, b2),
+                             (counter_rect.x, counter_rect.y + row),
+                             (counter_rect.right, counter_rect.y + row))
+        pygame.draw.rect(self.screen, (62, 72, 88), counter_rect, 2, border_radius=7)
+        pygame.draw.rect(self.screen, (78, 92, 112),
+                         (counter_rect.x, counter_rect.y, counter_rect.width, 4),
+                         border_radius=7)
 
-        # ── high-quality character renderer ────────────────────────────
+        # Register screen — vivid green
+        scr_glow = int((math.sin(t * 2.8) + 1) * 22)
+        pygame.draw.rect(self.screen, (0, min(255, 165 + scr_glow), min(255, 58 + scr_glow)),
+                         (counter_rect.x + 7, counter_rect.y + 7, 46, 30), border_radius=3)
+        pygame.draw.rect(self.screen, (0, min(255, 200 + scr_glow), 100),
+                         (counter_rect.x + 8, counter_rect.y + 8, 20, 8), border_radius=2)
+
+        # Scanner laser
+        laser_y = counter_rect.y + 44 + int(math.sin(t * 5.5) * 6)
+        pygame.draw.line(self.screen, (255, 48, 48),
+                         (counter_rect.x + 56, laser_y),
+                         (counter_rect.right - 7, laser_y), 2)
+        pygame.draw.line(self.screen, (255, 148, 148),
+                         (counter_rect.x + 56, laser_y - 1),
+                         (counter_rect.right - 7, laser_y - 1), 1)
+
+        # Conveyor belt
+        belt_x = counter_rect.x + 56
+        for stripe in range(5):
+            sx3 = belt_x + stripe * 14 + int(t * 22) % 14
+            pygame.draw.line(self.screen, (72, 78, 88),
+                             (sx3, counter_rect.y + 38), (sx3, counter_rect.y + 62), 2)
+        pygame.draw.rect(self.screen, (88, 95, 108),
+                         (belt_x, counter_rect.y + 36, counter_rect.right - 7 - belt_x, 2))
+        pygame.draw.rect(self.screen, (88, 95, 108),
+                         (belt_x, counter_rect.y + 63, counter_rect.right - 7 - belt_x, 2))
+
+        # ── Character renderer — vibrant shading ─────────────────────────
         def draw_person_walk(px_pos, py_pos, body_color, hat_color, label,
                              carrying, walk_phase, facing_down, paused,
-                             skin_tone=(224, 190, 155), hair_color=(60, 40, 25),
-                             pant_color=(45, 50, 75), shoe_color=(32, 22, 16)):
+                             skin_tone=(228, 192, 152), hair_color=(58, 38, 22),
+                             pant_color=(48, 52, 78), shoe_color=(30, 22, 14)):
             px_pos, py_pos = int(px_pos), int(py_pos)
+            bob    = 0   if paused else int(math.sin(walk_phase * 2) * 2.5)
+            swing  = 0.0 if paused else math.sin(walk_phase)
+            a_sw   = 0.0 if paused else math.sin(walk_phase + math.pi)
 
-            # smooth vertical bob (two bobs per stride)
-            bob = 0 if paused else int(math.sin(walk_phase * 2) * 2.2)
-            swing = 0.0 if paused else math.sin(walk_phase)
-            a_swing = 0.0 if paused else math.sin(walk_phase + math.pi)  # arms opposite legs
+            # Ground shadow — soft oval
+            shad_s = pygame.Surface((36, 10), pygame.SRCALPHA)
+            for sxi in range(18):
+                alp = int(95 * (1 - (sxi / 18) ** 1.5))
+                pygame.draw.line(shad_s, (0, 0, 0, alp), (18 - sxi, 5), (18 + sxi, 5), 1)
+            self.screen.blit(shad_s, (px_pos - 18, py_pos + 23))
 
-            # ── soft ground shadow (oval, fades toward edges) ──────────
-            shadow_surf = pygame.Surface((34, 10), pygame.SRCALPHA)
-            for sx in range(17):
-                alpha = int(90 * (1 - (sx / 17) ** 1.6))
-                pygame.draw.line(shadow_surf, (0, 0, 0, alpha),
-                                 (17 - sx, 5), (17 + sx, 5), 1)
-            self.screen.blit(shadow_surf, (px_pos - 17, py_pos + 22))
+            # Legs
+            for li, (lx, lsw) in enumerate([(-4, swing), (3, -swing)]):
+                depth = li == 0
+                ly_e  = int(lsw * 8)
+                pshd  = tuple(max(0, v - (22 if depth else 0)) for v in pant_color)
+                phi   = tuple(min(255, v + 18) for v in pant_color)
+                pygame.draw.rect(self.screen, pshd, (px_pos + lx - 1, py_pos + 8 + bob, 6, 7), border_radius=3)
+                pygame.draw.rect(self.screen, pshd, (px_pos + lx, py_pos + 14 + bob + ly_e, 5, 6), border_radius=2)
+                sx4 = px_pos + lx - (1 if facing_down else 0); sy4 = py_pos + 19 + bob + ly_e
+                pygame.draw.rect(self.screen, shoe_color, (sx4, sy4, 8, 4), border_radius=2)
+                pygame.draw.line(self.screen, tuple(min(255, v + 28) for v in shoe_color),
+                                 (sx4 + 1, sy4 + 1), (sx4 + 6, sy4 + 1), 1)
 
-            # ── leg geometry (two tapered legs with depth cue) ─────────
-            # back leg drawn first (slightly darker, offset behind)
-            leg_pairs = [(-4, swing), (3, -swing)]  # (x_off, y_swing)
-            for li, (lx, lsw) in enumerate(leg_pairs):
-                depth = li == 0  # first = back leg
-                ly_extra = int(lsw * 8)
-                leg_shade = tuple(max(0, v - (18 if depth else 0)) for v in pant_color)
-                # upper leg (thigh)
-                pygame.draw.rect(self.screen, leg_shade,
-                                 (px_pos + lx - 1, py_pos + 8 + bob, 6, 7), border_radius=3)
-                # lower leg (shin — slightly narrower)
-                pygame.draw.rect(self.screen, leg_shade,
-                                 (px_pos + lx, py_pos + 14 + bob + ly_extra, 5, 6), border_radius=2)
-                # shoe — rounded, with sole highlight
-                shoe_x = px_pos + lx - (1 if facing_down else 0)
-                shoe_y = py_pos + 19 + bob + ly_extra
-                pygame.draw.rect(self.screen, shoe_color,
-                                 (shoe_x, shoe_y, 8, 4), border_radius=2)
-                pygame.draw.line(self.screen,
-                                 tuple(min(255, v + 22) for v in shoe_color),
-                                 (shoe_x + 1, shoe_y + 1), (shoe_x + 6, shoe_y + 1), 1)
+            # Torso
+            tx4, ty4 = px_pos - 8, py_pos - 8 + bob
+            pygame.draw.rect(self.screen, body_color, (tx4, ty4, 16, 17), border_radius=4)
+            shd_bc = tuple(max(0, v - 42) for v in body_color)
+            hi_bc  = tuple(min(255, v + 45) for v in body_color)
+            pygame.draw.rect(self.screen, shd_bc, (tx4 + 11, ty4 + 2, 4, 13), border_radius=2)
+            pygame.draw.rect(self.screen, hi_bc,  (tx4 + 2, ty4 + 1, 4, 8), border_radius=2)
+            pygame.draw.line(self.screen, tuple(min(255, v + 60) for v in body_color),
+                             (tx4 + 3, ty4 + 2), (tx4 + 12, ty4 + 2), 1)
 
-            # ── torso with fabric shading ───────────────────────────────
-            torso_x, torso_y = px_pos - 8, py_pos - 8 + bob
-            torso_w, torso_h = 16, 17
-
-            # base shirt
-            pygame.draw.rect(self.screen, body_color,
-                             (torso_x, torso_y, torso_w, torso_h), border_radius=4)
-            # left-side shadow strip (depth)
-            shadow_col = tuple(max(0, v - 38) for v in body_color)
-            pygame.draw.rect(self.screen, shadow_col,
-                             (torso_x + torso_w - 5, torso_y + 2, 4, torso_h - 4), border_radius=2)
-            # centre highlight (fabric sheen)
-            hi_col = tuple(min(255, v + 42) for v in body_color)
-            pygame.draw.rect(self.screen, hi_col,
-                             (torso_x + 2, torso_y + 2, 4, 8), border_radius=2)
-            # collar line
-            collar_col = tuple(min(255, v + 60) for v in body_color)
-            pygame.draw.line(self.screen, collar_col,
-                             (torso_x + 4, torso_y + 2), (torso_x + 11, torso_y + 2), 1)
-
-            # ── arms (swing opposite to legs) ──────────────────────────
-            arm_col  = tuple(max(0, v - 22) for v in body_color)
-            arm_hi   = tuple(min(255, v + 18) for v in body_color)
-            skin_arm = tuple(max(0, v - 15) for v in skin_tone)
-            # back arm
-            bax = px_pos - 14
-            bay = py_pos - 5 + int(a_swing * 7) + bob
-            pygame.draw.rect(self.screen, arm_col, (bax, bay, 6, 11), border_radius=3)
-            pygame.draw.rect(self.screen, arm_hi,  (bax + 1, bay + 1, 2, 5), border_radius=1)
+            # Arms
+            arm_shd = tuple(max(0, v - 25) for v in body_color)
+            skin_arm = tuple(max(0, v - 18) for v in skin_tone)
+            bax = px_pos - 14; bay = py_pos - 5 + int(a_sw * 7) + bob
+            pygame.draw.rect(self.screen, arm_shd, (bax, bay, 6, 11), border_radius=3)
             pygame.draw.rect(self.screen, skin_arm, (bax + 1, bay + 8, 4, 4), border_radius=2)
-            # front arm
-            fax = px_pos + 8
-            fay = py_pos - 5 + int(-a_swing * 7) + bob
-            pygame.draw.rect(self.screen, arm_col, (fax, fay, 6, 11), border_radius=3)
-            pygame.draw.rect(self.screen, arm_hi,  (fax + 1, fay + 1, 2, 5), border_radius=1)
+            fax = px_pos + 8; fay = py_pos - 5 + int(-a_sw * 7) + bob
+            pygame.draw.rect(self.screen, arm_shd, (fax, fay, 6, 11), border_radius=3)
             pygame.draw.rect(self.screen, skin_arm, (fax + 1, fay + 8, 4, 4), border_radius=2)
 
-            # ── head (circle base + detailed face) ─────────────────────
-            hx, hy = px_pos, py_pos - 20 + bob
-            head_r = 8
-
-            # neck
-            pygame.draw.rect(self.screen, skin_tone,
-                             (hx - 3, hy + head_r - 2, 6, 5), border_radius=2)
-
-            # head base circle
-            pygame.draw.circle(self.screen, skin_tone, (hx, hy), head_r)
-            # cheek blush
-            pygame.draw.circle(self.screen, (235, 170, 155), (hx - 4, hy + 2), 3)
-            pygame.draw.circle(self.screen, (235, 170, 155), (hx + 4, hy + 2), 3)
-            # side shadow (gives roundness)
-            side_shadow = pygame.Surface((head_r * 2, head_r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(side_shadow, (0, 0, 0, 40), (head_r * 2 - 4, head_r), head_r)
-            self.screen.blit(side_shadow, (hx - head_r, hy - head_r))
-            # brow ridge highlight
-            pygame.draw.arc(self.screen, tuple(min(255, v + 28) for v in skin_tone),
-                            (hx - 6, hy - 7, 12, 8), 0.2, math.pi - 0.2, 2)
-
-            # eyes (whites + iris + pupil)
+            # Head
+            hx4, hy4 = px_pos, py_pos - 20 + bob; head_r = 8
+            pygame.draw.rect(self.screen, skin_tone, (hx4 - 3, hy4 + head_r - 2, 6, 5), border_radius=2)
+            pygame.draw.circle(self.screen, skin_tone, (hx4, hy4), head_r)
+            pygame.draw.circle(self.screen, tuple(min(255, v + 22) for v in skin_tone),
+                               (hx4 - 2, hy4 - 2), 3)
+            pygame.draw.circle(self.screen, (238, 172, 148), (hx4 - 4, hy4 + 2), 3)
+            pygame.draw.circle(self.screen, (238, 172, 148), (hx4 + 4, hy4 + 2), 3)
+            pygame.draw.ellipse(self.screen, hair_color,
+                                (hx4 - head_r, hy4 - head_r, head_r * 2, head_r + 2))
+            pygame.draw.rect(self.screen, hair_color, (hx4 - head_r - 1, hy4 - 2, 3, 5), border_radius=1)
+            pygame.draw.rect(self.screen, hair_color, (hx4 + head_r - 2, hy4 - 2, 3, 5), border_radius=1)
             eye_dir = 1 if facing_down else -1
             for ex_off in [-3, 3]:
-                ex = hx + ex_off
-                ey = hy - 2 + eye_dir
-                # white
-                pygame.draw.ellipse(self.screen, (245, 245, 250), (ex - 2, ey - 1, 4, 3))
-                # iris
-                pygame.draw.circle(self.screen, (60, 90, 140), (ex, ey + 1), 1)
-                # pupil
-                pygame.draw.circle(self.screen, (20, 18, 22), (ex, ey + 1), 0)
-                # eyelid crease
-                pygame.draw.line(self.screen, tuple(max(0, v - 30) for v in skin_tone),
-                                 (ex - 2, ey - 1), (ex + 2, ey - 1), 1)
+                ex4 = hx4 + ex_off; ey4 = hy4 - 2 + eye_dir
+                pygame.draw.ellipse(self.screen, (248, 248, 252), (ex4 - 2, ey4 - 1, 4, 3))
+                pygame.draw.circle(self.screen, (55, 88, 145), (ex4, ey4 + 1), 1)
+            pygame.draw.arc(self.screen, (185, 95, 85),
+                            (hx4 - 3, hy4 + 3, 6, 4), math.pi + 0.4, 2 * math.pi - 0.4, 1)
 
-            # mouth (subtle smile)
-            pygame.draw.arc(self.screen, (180, 100, 90),
-                            (hx - 3, hy + 3, 6, 4), math.pi + 0.4, 2 * math.pi - 0.4, 1)
-
-            # ── hair ────────────────────────────────────────────────────
-            hair_hi = tuple(min(255, v + 35) for v in hair_color)
-            # main hair mass on top
-            pygame.draw.ellipse(self.screen, hair_color,
-                                (hx - head_r, hy - head_r, head_r * 2, head_r + 2))
-            # hair highlight
-            pygame.draw.ellipse(self.screen, hair_hi,
-                                (hx - 4, hy - head_r + 1, 5, 3))
-            # side hair pieces
-            pygame.draw.rect(self.screen, hair_color,
-                             (hx - head_r - 1, hy - 3, 3, 6), border_radius=1)
-            pygame.draw.rect(self.screen, hair_color,
-                             (hx + head_r - 2, hy - 3, 3, 6), border_radius=1)
-
-            # ── hat (employee/staff only) ────────────────────────────────
+            # Hat
             if hat_color:
-                hat_hi  = tuple(min(255, v + 35) for v in hat_color)
-                hat_shd = tuple(max(0, v - 30) for v in hat_color)
-                # brim
-                pygame.draw.rect(self.screen, hat_shd,
-                                 (hx - head_r - 2, hy - head_r + 2, head_r * 2 + 4, 5),
-                                 border_radius=2)
-                # crown
+                hat_hi4 = tuple(min(255, v + 38) for v in hat_color)
+                hat_shd4 = tuple(max(0, v - 32) for v in hat_color)
+                pygame.draw.rect(self.screen, hat_shd4,
+                                 (hx4 - head_r - 2, hy4 - head_r + 2, head_r * 2 + 4, 5), border_radius=2)
                 pygame.draw.rect(self.screen, hat_color,
-                                 (hx - 6, hy - head_r - 6, 12, 9), border_radius=3)
-                # crown highlight
-                pygame.draw.rect(self.screen, hat_hi,
-                                 (hx - 4, hy - head_r - 5, 4, 4), border_radius=2)
-                # badge pin
-                pygame.draw.circle(self.screen, (255, 215, 40), (hx + 2, hy - head_r - 2), 2)
-                pygame.draw.circle(self.screen, (200, 160, 20), (hx + 2, hy - head_r - 2), 2, 1)
+                                 (hx4 - 6, hy4 - head_r - 6, 12, 9), border_radius=3)
+                pygame.draw.rect(self.screen, hat_hi4,
+                                 (hx4 - 4, hy4 - head_r - 5, 5, 4), border_radius=2)
+                pygame.draw.circle(self.screen, (255, 218, 38), (hx4 + 2, hy4 - head_r - 2), 2)
 
-            # ── carried stock box ────────────────────────────────────────
+            # Carrying box
             if carrying:
-                bx = px_pos + (10 if facing_down else -23)
-                by = py_pos - 12 + bob
-                # box body with subtle gradient (lighter top face)
-                pygame.draw.rect(self.screen, (210, 170, 90),
-                                 (bx, by, 16, 13), border_radius=2)
-                # top face (lighter — catches light)
-                pygame.draw.rect(self.screen, (230, 195, 115),
-                                 (bx, by, 16, 4), border_radius=2)
-                # side face (darker)
-                pygame.draw.rect(self.screen, (160, 125, 60),
-                                 (bx + 12, by + 3, 4, 10), border_radius=1)
-                # tape stripe
-                pygame.draw.rect(self.screen, (190, 60, 55),
-                                 (bx + 1, by + 5, 14, 3))
-                # box outline
-                pygame.draw.rect(self.screen, (140, 105, 45),
-                                 (bx, by, 16, 13), 1, border_radius=2)
+                bx4 = px_pos + (10 if facing_down else -24); by4 = py_pos - 13 + bob
+                pygame.draw.rect(self.screen, (218, 175, 88), (bx4, by4, 16, 13), border_radius=2)
+                pygame.draw.rect(self.screen, (238, 202, 118), (bx4, by4, 16, 4), border_radius=2)
+                pygame.draw.rect(self.screen, (162, 125, 58), (bx4 + 12, by4 + 3, 4, 10), border_radius=1)
+                pygame.draw.rect(self.screen, (198, 58, 52), (bx4 + 1, by4 + 5, 14, 3))
+                pygame.draw.rect(self.screen, (142, 105, 42), (bx4, by4, 16, 13), 1, border_radius=2)
 
-            # ── role badge / name label ──────────────────────────────────
+            # Label
             if label:
-                lsurf = font_sec.render(label, True, (220, 230, 245))
-                lw = lsurf.get_width()
-                # pill background
-                pill = pygame.Surface((lw + 8, 13), pygame.SRCALPHA)
-                pygame.draw.rect(pill, (20, 22, 38, 180), pill.get_rect(), border_radius=6)
-                self.screen.blit(pill, (px_pos - lw // 2 - 4, py_pos + 24))
-                self.screen.blit(lsurf, (px_pos - lw // 2, py_pos + 26))
+                lsurf3 = font_sec.render(label, True, (225, 235, 248))
+                lw3    = lsurf3.get_width()
+                pill3  = pygame.Surface((lw3 + 8, 13), pygame.SRCALPHA)
+                pygame.draw.rect(pill3, (18, 20, 38, 190), pill3.get_rect(), border_radius=6)
+                self.screen.blit(pill3, (px_pos - lw3 // 2 - 4, py_pos + 25))
+                self.screen.blit(lsurf3, (px_pos - lw3 // 2, py_pos + 27))
 
-        # draw all chars — each has unique skin tone, hair colour, pants
+        # Draw preview characters
         CHAR_DETAILS = [
-            # skin_tone,           hair_color,       pant_color,       shoe_color
-            ((220, 185, 145), (55,  35, 22),  (45,  50,  80), (28, 20, 16)),  # C1 light
-            ((175, 125,  85), (20,  15, 10),  (55,  40,  35), (22, 14, 10)),  # C2 medium-dark
-            ((235, 200, 165), (140, 80,  30),  (35,  55,  45), (26, 18, 14)),  # C3 light-auburn
-            ((160,  95,  60), (18,  12,  8),  (40,  48,  70), (24, 16, 12)),  # EMP dark
-            ((210, 170, 130), (90,  55,  20),  (50,  44,  35), (30, 22, 18)),  # TRN medium
-            ((225, 190, 155), (60,  45,  30),  (35,  38,  65), (25, 18, 14)),  # CSH light
+            ((222, 188, 145), (55, 35, 20), (45, 50, 80), (28, 20, 15)),
+            ((175, 125, 82), (20, 14, 8), (55, 42, 35), (22, 14, 10)),
+            ((238, 202, 165), (142, 78, 28), (35, 56, 45), (25, 18, 13)),
+            ((158, 92, 58), (18, 10, 6), (40, 48, 72), (24, 16, 12)),
+            ((212, 172, 128), (92, 55, 18), (52, 44, 34), (30, 22, 18)),
+            ((228, 192, 155), (60, 44, 28), (35, 38, 65), (25, 18, 14)),
         ]
         for idx, ch in enumerate(self._preview_chars):
-            paused = ch["pause_t"] > 0
+            paused      = ch["pause_t"] > 0
             facing_down = ch["vy"] >= 0
             sk, hr, pt, sh = CHAR_DETAILS[idx % len(CHAR_DETAILS)]
             draw_person_walk(
@@ -2145,132 +2415,64 @@ class App:
                 skin_tone=sk, hair_color=hr, pant_color=pt, shoe_color=sh,
             )
 
-        # ── stacked cart corral (bottom-left corner) ────────────────
-        STACK_X = ix + 8
-        STACK_Y = inset.bottom - 85
+        # ── Cart corral ──────────────────────────────────────────────────
+        STACK_X = ix + 9; STACK_Y = inset.bottom - 88
 
         def draw_single_cart(cx, cy, item_col=None, small=False):
-            """Perspective shopping cart — top-down with 3D depth cues."""
-            s = 0.62 if small else 1.0
-            bw = int(38 * s)   # basket width
-            bh = int(24 * s)   # basket height (front face)
-            dp = int(10 * s)   # depth offset (isometric back edge)
-
+            s   = 0.62 if small else 1.0
+            bw  = int(38 * s); bh = int(24 * s); dp = int(10 * s)
             cx, cy = int(cx), int(cy)
-
-            # ── frame metal colour palette ───────────────────────────
-            metal_mid  = (148, 158, 170)
-            metal_hi   = (200, 210, 218)
-            metal_shd  = (90,  98, 108)
-            wheel_col  = (42,  44,  54)
-            wheel_hi   = (75,  80,  92)
-
-            # ── back (top) face of basket ───────────────────────────
-            back_poly = [
-                (cx + dp,      cy - dp),
-                (cx + bw + dp, cy - dp),
-                (cx + bw,      cy),
-                (cx,           cy),
-            ]
+            metal_hi  = (205, 215, 225); metal_mid = (152, 162, 175); metal_shd = (92, 100, 112)
+            wheel_col = (42, 44, 55);    wheel_hi  = (78, 82, 95)
+            back_poly = [(cx+dp,cy-dp),(cx+bw+dp,cy-dp),(cx+bw,cy),(cx,cy)]
             pygame.draw.polygon(self.screen, metal_shd, back_poly)
             pygame.draw.polygon(self.screen, metal_mid, back_poly, 1)
-
-            # ── front face of basket ────────────────────────────────
-            pygame.draw.rect(self.screen, metal_mid, (cx, cy, bw, bh), border_radius=2)
-
-            # wire grid on front face
-            grid_col = tuple(max(0, v - 28) for v in metal_mid)
-            for wx in range(cx + int(9*s), cx + bw, int(9*s)):
-                pygame.draw.line(self.screen, grid_col, (wx, cy + 2), (wx, cy + bh - 2), 1)
-            for wy in range(cy + int(8*s), cy + bh, int(8*s)):
-                pygame.draw.line(self.screen, grid_col, (cx + 2, wy), (cx + bw - 2, wy), 1)
-
-            # top rim highlight
-            pygame.draw.rect(self.screen, metal_hi, (cx, cy, bw, int(3*s)), border_radius=1)
-
-            # right side face (gives 3-D depth)
-            side_poly = [
-                (cx + bw,      cy),
-                (cx + bw + dp, cy - dp),
-                (cx + bw + dp, cy - dp + bh),
-                (cx + bw,      cy + bh),
-            ]
-            pygame.draw.polygon(self.screen, metal_shd, side_poly)
-            pygame.draw.polygon(self.screen, metal_mid, side_poly, 1)
-
-            # ── item in basket (coloured product block) ─────────────
+            pygame.draw.rect(self.screen, metal_mid, (cx,cy,bw,bh), border_radius=2)
+            pygame.draw.rect(self.screen, metal_hi,  (cx,cy,bw,int(3*s)), border_radius=1)
+            grid_col = tuple(max(0,v-30) for v in metal_mid)
+            for wx5 in range(cx+int(9*s),cx+bw,int(9*s)):
+                pygame.draw.line(self.screen,grid_col,(wx5,cy+2),(wx5,cy+bh-2),1)
+            for wy5 in range(cy+int(8*s),cy+bh,int(8*s)):
+                pygame.draw.line(self.screen,grid_col,(cx+2,wy5),(cx+bw-2,wy5),1)
+            side_poly = [(cx+bw,cy),(cx+bw+dp,cy-dp),(cx+bw+dp,cy-dp+bh),(cx+bw,cy+bh)]
+            pygame.draw.polygon(self.screen,metal_shd,side_poly)
+            pygame.draw.polygon(self.screen,metal_mid,side_poly,1)
+            hbw2=int(16*s);hbh2=int(5*s)
+            hx5=cx+bw-hbw2-int(2*s)+dp;hy5=cy-dp-hbh2
+            pygame.draw.rect(self.screen,metal_hi,(hx5,hy5,hbw2,hbh2),border_radius=2)
+            pygame.draw.rect(self.screen,metal_mid,(hx5+hbw2-int(4*s),cy-dp,int(4*s),int(14*s)),border_radius=1)
+            pygame.draw.rect(self.screen,metal_shd,(cx-int(3*s),cy+int(5*s),int(4*s),int(15*s)),border_radius=1)
+            axle_y=cy+bh+int(2*s)
+            for axle_x in [cx+int(3*s),cx+bw-int(5*s)]:
+                pygame.draw.line(self.screen,metal_mid,(axle_x,axle_y),(axle_x,axle_y+int(8*s)),2)
+            wr=max(2,int(4*s));wy6=axle_y+int(8*s)
+            for wxp in [cx+int(2*s),cx+int(7*s),cx+bw-int(8*s),cx+bw-int(3*s)]:
+                pygame.draw.circle(self.screen,wheel_col,(wxp,wy6),wr)
+                pygame.draw.circle(self.screen,wheel_hi,(wxp,wy6),max(1,wr-1))
+                pygame.draw.circle(self.screen,metal_hi,(wxp,wy6),max(1,wr-2))
             if item_col:
-                # item sits inside front face
-                pad = int(5 * s)
-                iw2 = bw - pad * 2
-                ih2 = int((bh - pad) * 0.55)
-                item_hi = tuple(min(255, v + 40) for v in item_col)
-                item_shd = tuple(max(0, v - 30) for v in item_col)
-                pygame.draw.rect(self.screen, item_col,
-                                 (cx + pad, cy + pad, iw2, ih2), border_radius=2)
-                pygame.draw.rect(self.screen, item_hi,
-                                 (cx + pad, cy + pad, iw2, int(ih2 * 0.35)), border_radius=2)
-                pygame.draw.rect(self.screen, item_shd,
-                                 (cx + pad, cy + pad, iw2, ih2), 1, border_radius=2)
+                pad2=int(5*s);iw4=bw-pad2*2;ih4=int((bh-pad2)*0.55)
+                pygame.draw.rect(self.screen,item_col,(cx+pad2,cy+pad2,iw4,ih4),border_radius=2)
+                pygame.draw.rect(self.screen,tuple(min(255,v+45) for v in item_col),(cx+pad2,cy+pad2,iw4,int(ih4*0.4)),border_radius=2)
 
-            # ── handle bar (back-top edge) ───────────────────────────
-            hbw = int(16 * s)
-            hbh = int(5 * s)
-            hx2 = cx + bw - hbw - int(2*s) + dp
-            hy2 = cy - dp - hbh
-            pygame.draw.rect(self.screen, metal_hi,
-                             (hx2, hy2, hbw, hbh), border_radius=2)
-            # handle post
-            pygame.draw.rect(self.screen, metal_mid,
-                             (hx2 + hbw - int(4*s), cy - dp, int(4*s), int(14*s)),
-                             border_radius=1)
-
-            # ── front push bar ───────────────────────────────────────
-            pygame.draw.rect(self.screen, metal_shd,
-                             (cx - int(3*s), cy + int(5*s), int(4*s), int(15*s)),
-                             border_radius=1)
-
-            # ── axles and wheels ─────────────────────────────────────
-            axle_y = cy + bh + int(2*s)
-            # front axle
-            pygame.draw.line(self.screen, metal_mid,
-                             (cx + int(3*s), axle_y),
-                             (cx + int(3*s), axle_y + int(8*s)), 2)
-            pygame.draw.line(self.screen, metal_mid,
-                             (cx + bw - int(5*s), axle_y),
-                             (cx + bw - int(5*s), axle_y + int(8*s)), 2)
-            wr = max(2, int(4 * s))
-            wy2 = axle_y + int(8*s)
-            for wxp in [cx + int(2*s), cx + int(7*s),
-                        cx + bw - int(8*s), cx + bw - int(3*s)]:
-                pygame.draw.circle(self.screen, wheel_col, (wxp, wy2), wr)
-                pygame.draw.circle(self.screen, wheel_hi,  (wxp, wy2), max(1, wr - 1))
-                # axle pin highlight
-                pygame.draw.circle(self.screen, metal_hi, (wxp, wy2), max(1, wr - 2))
-
-        # stacked carts (3 nested, offset slightly)
         for si in range(3):
             draw_single_cart(STACK_X + si * 6, STACK_Y - si * 3, small=True)
+        cl = font_sec.render("CARTS", True, (145, 152, 165))
+        self.screen.blit(cl, (STACK_X + 2, STACK_Y - 15))
 
-        # "CARTS" label on corral
-        cl = font_sec.render("CARTS", True, (140, 148, 158))
-        self.screen.blit(cl, (STACK_X + 2, STACK_Y - 14))
-
-        # customer carts — pushed ahead of each customer character
         customer_chars = self._preview_chars[:3]
         for ci2, ch in enumerate(customer_chars):
-            # place cart slightly ahead of the character in their walking direction
-            cart_offset_y = 28 if ch["vy"] >= 0 else -38
-            cx2 = int(ch["x"]) - 19     # centre cart on character x
-            cy2 = int(ch["y"]) + cart_offset_y
-            item_col2 = list(PRODUCT_CATALOG.values())[ci2 % len(PRODUCT_CATALOG)]["color"]
-            draw_single_cart(cx2, cy2, item_col=item_col2)
+            cart_off_y = 28 if ch["vy"] >= 0 else -38
+            cx5 = int(ch["x"]) - 19; cy5 = int(ch["y"]) + cart_off_y
+            item_col3 = list(PRODUCT_CATALOG.values())[ci2 % len(PRODUCT_CATALOG)]["color"]
+            draw_single_cart(cx5, cy5, item_col=item_col3)
 
-        # ── entrance mat ────────────────────────────────────────────
-        mat = pygame.Rect(inset.centerx - 50, inset.bottom - 18, 100, 14)
-        pygame.draw.rect(self.screen, (65, 48, 30), mat, border_radius=3)
-        draw_text(self.screen, "WELCOME", (mat.centerx, mat.y + 2),
-                  size=9, bold=True, color=(200, 180, 140), center=True)
+        # ── Entrance mat ─────────────────────────────────────────────────
+        mat = pygame.Rect(inset.centerx - 52, inset.bottom - 20, 104, 16)
+        pygame.draw.rect(self.screen, (68, 48, 28), mat, border_radius=4)
+        pygame.draw.rect(self.screen, (88, 65, 38), mat, 2, border_radius=4)
+        draw_text(self.screen, "WELCOME", (mat.centerx, mat.y + 3),
+                  size=9, bold=True, color=(205, 182, 138), center=True)
 
     def draw_menu(self):
         t = self.auth_time
@@ -2566,24 +2768,20 @@ class App:
                       (bx + 16, by + bubble_h - 22), size=SMALL_SIZE, color=TEXT_MUTED)
 
     def draw_store_map(self):  # noqa: C901  (complex but intentional)
-        t = self.auth_time  # shared animation clock
+        t = self.auth_time
 
-        # ── day/night cycle driven by day_timer ────────────────────────────
+        # ── Day/night cycle ──────────────────────────────────────────────
         day_frac = 1.0 - max(0.0, min(1.0, self.day_timer / max(1, DAY_LENGTH_SECONDS)))
 
         def sky_col(frac):
             stops = [
-                (0.00, (255, 160,  80)),
-                (0.12, (255, 210, 120)),
-                (0.30, (130, 190, 255)),
-                (0.55, (100, 170, 240)),
-                (0.72, (255, 180,  90)),
-                (0.85, (220,  90,  50)),
-                (1.00, ( 18,  20,  45)),
+                (0.00, (255, 145,  65)), (0.12, (255, 200, 100)),
+                (0.28, ( 90, 175, 255)), (0.55, ( 65, 148, 240)),
+                (0.72, (255, 168,  72)), (0.85, (210,  72,  38)),
+                (1.00, ( 12,  16,  40)),
             ]
             for i in range(len(stops) - 1):
-                f0, c0 = stops[i]
-                f1, c1 = stops[i + 1]
+                f0, c0 = stops[i]; f1, c1 = stops[i+1]
                 if f0 <= frac <= f1:
                     lt = (frac - f0) / (f1 - f0)
                     return tuple(int(lerp(c0[j], c1[j], lt)) for j in range(3))
@@ -2591,123 +2789,133 @@ class App:
 
         sky = sky_col(day_frac)
 
-        # ── master floor rect ──────────────────────────────────────────────
+        # ── Floor — warm gradient ────────────────────────────────────────
         floor = pygame.Rect(28, 74, WIDTH - 56, HEIGHT - 110)
-        pygame.draw.rect(self.screen, FLOOR, floor, border_radius=24)
+        for _row in range(floor.height):
+            _f = _row / floor.height
+            pygame.draw.line(self.screen,
+                (int(lerp(205,175,_f)), int(lerp(198,168,_f)), int(lerp(178,148,_f))),
+                (floor.x, floor.y + _row), (floor.right, floor.y + _row))
 
-        # ── windows row at top of store (matches preview) ──────────────────
+        # ── Window header — deep gradient ────────────────────────────────
         WIN_ROW_H = 52
-        win_zone = pygame.Rect(floor.x, floor.y, floor.width, WIN_ROW_H)
-        pygame.draw.rect(self.screen, (50, 55, 70), win_zone, border_radius=24)
+        for _row in range(WIN_ROW_H):
+            _f = _row / WIN_ROW_H
+            pygame.draw.line(self.screen,
+                (int(lerp(38,52,_f)), int(lerp(44,60,_f)), int(lerp(62,82,_f))),
+                (floor.x, floor.y + _row), (floor.right, floor.y + _row))
 
-        n_wins = 8
-        win_w, win_h = 62, 34
+        # ── Windows — sky gradient + beveled stone frames ────────────────
+        n_wins = 8; win_w = 62; win_h = 36
         win_gap = (floor.width - n_wins * win_w) // (n_wins + 1)
         for wi in range(n_wins):
-            wx = floor.x + win_gap + wi * (win_w + win_gap)
-            wy = floor.y + 8
-            pygame.draw.rect(self.screen, (80, 75, 65), (wx - 3, wy - 3, win_w + 6, win_h + 6), border_radius=4)
+            wx = floor.x + win_gap + wi * (win_w + win_gap); wy = floor.y + 8
+            pygame.draw.rect(self.screen, (95,88,75),   (wx-4, wy-4, win_w+8, win_h+8), border_radius=3)
+            pygame.draw.rect(self.screen, (128,120,105),(wx-4, wy-4, win_w+8, 3),        border_radius=2)
+            pygame.draw.rect(self.screen, (68,62,52),   (wx-4, wy+win_h, win_w+8, 4),   border_radius=2)
             for row in range(win_h):
-                row_frac = row / max(1, win_h - 1)
-                base = sky
-                horizon = tuple(min(255, v + 28) for v in sky)
-                rc = tuple(int(lerp(base[j], horizon[j], row_frac)) for j in range(3))
-                pygame.draw.line(self.screen, rc, (wx, wy + row), (wx + win_w - 1, wy + row))
-            # sun / moon
-            sun_x = wx + int(win_w * 0.5 + math.sin(day_frac * math.pi * 2) * win_w * 0.36)
-            sun_y = wy + int(win_h * 0.5 - math.cos(day_frac * math.pi * 2) * win_h * 0.32)
+                rf = row / max(1, win_h - 1)
+                horizon = tuple(min(255, v+35) for v in sky)
+                rc = tuple(int(lerp(sky[j], horizon[j], rf)) for j in range(3))
+                pygame.draw.line(self.screen, rc, (wx, wy+row), (wx+win_w-1, wy+row))
+            sun_x = wx + int(win_w*0.5 + math.sin(day_frac*math.pi*2)*win_w*0.34)
+            sun_y = wy + int(win_h*0.5 - math.cos(day_frac*math.pi*2)*win_h*0.30)
             if day_frac < 0.82:
-                sc = (255, 240, 100) if day_frac < 0.65 else (255, 160, 60)
-                pygame.draw.circle(self.screen, sc, (sun_x, sun_y), 5)
-                if 0.3 < day_frac < 0.6:
+                sc = (255,245,110) if day_frac < 0.65 else (255,165,55)
+                pygame.draw.circle(self.screen, sc, (sun_x, sun_y), 7)
+                pygame.draw.circle(self.screen, (255,255,200), (sun_x-1, sun_y-1), 3)
+                if 0.28 < day_frac < 0.62:
                     for ang in range(0, 360, 45):
-                        rx = int(math.cos(math.radians(ang)) * 8)
-                        ry = int(math.sin(math.radians(ang)) * 8)
-                        pygame.draw.line(self.screen, (255, 230, 80), (sun_x, sun_y), (sun_x + rx, sun_y + ry), 1)
+                        pygame.draw.line(self.screen, (255,235,80), (sun_x, sun_y),
+                            (sun_x+int(math.cos(math.radians(ang))*11),
+                             sun_y+int(math.sin(math.radians(ang))*11)), 1)
             else:
-                pygame.draw.circle(self.screen, (230, 230, 210), (sun_x, sun_y), 4)
-                pygame.draw.circle(self.screen, sky, (sun_x + 2, sun_y - 1), 3)
-            pygame.draw.line(self.screen, (80, 75, 65), (wx + win_w // 2, wy), (wx + win_w // 2, wy + win_h), 1)
-            pygame.draw.line(self.screen, (80, 75, 65), (wx, wy + win_h // 2), (wx + win_w, wy + win_h // 2), 1)
-            pygame.draw.rect(self.screen, (100, 95, 85), (wx - 4, wy + win_h, win_w + 8, 5), border_radius=2)
+                pygame.draw.circle(self.screen, (235,235,215), (sun_x, sun_y), 6)
+                pygame.draw.circle(self.screen, sky, (sun_x+3, sun_y-1), 5)
+            pygame.draw.line(self.screen, (85,78,66), (wx+win_w//2, wy), (wx+win_w//2, wy+win_h), 2)
+            pygame.draw.line(self.screen, (85,78,66), (wx, wy+win_h//2), (wx+win_w, wy+win_h//2), 2)
+            pygame.draw.line(self.screen, (255,255,255), (wx+2, wy+2), (wx+14, wy+2), 1)
+            pygame.draw.line(self.screen, (255,255,255), (wx+2, wy+2), (wx+2, wy+12), 1)
+            pygame.draw.rect(self.screen, (115,108,93), (wx-5, wy+win_h, win_w+10, 6), border_radius=2)
+            pygame.draw.rect(self.screen, (142,135,120),(wx-5, wy+win_h, win_w+10, 2), border_radius=1)
 
-        # time-of-day label
-        hour_labels = ["DAWN", "MORNING", "MIDDAY", "AFTERNOON", "DUSK", "NIGHT"]
+        hour_labels = ["DAWN","MORNING","MIDDAY","AFTERNOON","DUSK","NIGHT"]
         hour_idx = min(5, int(day_frac * 6))
-        tod_lbl = get_font(9, bold=True).render(hour_labels[hour_idx], True, (200, 210, 220))
+        tod_lbl = get_font(9, bold=True).render(hour_labels[hour_idx], True, (200,215,228))
         self.screen.blit(tod_lbl, (floor.right - tod_lbl.get_width() - 14, floor.y + WIN_ROW_H - 14))
 
-        # ── tiled floor below windows ──────────────────────────────────────
+        # ── Floor tiles + ceiling light shafts ───────────────────────────
         floor_y = floor.y + WIN_ROW_H
         tile = 32
         for gx in range(floor.x, floor.right, tile):
-            pygame.draw.line(self.screen, AISLE, (gx, floor_y), (gx, floor.bottom), 1)
+            pygame.draw.line(self.screen, (168,158,138), (gx, floor_y), (gx, floor.bottom), 1)
         for gy in range(floor_y, floor.bottom, tile):
-            pygame.draw.line(self.screen, AISLE, (floor.x + 4, gy), (floor.right - 4, gy), 1)
+            pygame.draw.line(self.screen, (168,158,138), (floor.x+4, gy), (floor.right-4, gy), 1)
+        for _lx in range(floor.x+80, floor.right-60, 160):
+            _ls = pygame.Surface((55, floor.bottom - floor_y), pygame.SRCALPHA)
+            _la = int(10 + 7*math.sin(t*2.5 + _lx))
+            pygame.draw.rect(_ls, (255,245,200,_la), _ls.get_rect())
+            self.screen.blit(_ls, (_lx, floor_y))
+            pygame.draw.rect(self.screen, (232,228,212), (_lx+4, floor_y, 47, 5))
+            pygame.draw.rect(self.screen, (248,245,230), (_lx+6, floor_y, 43, 2))
 
-        # ── shared drawing helpers ─────────────────────────────────────────
+        # ── Drawing helpers ───────────────────────────────────────────────
         font_sec  = get_font(10, bold=True)
         font_sign = get_font(11, bold=True)
 
-        def draw_overhead_sign(cx, sign_y, text, bg_col, fill_ratio=None, text_col=(255, 245, 200)):
-            """Draw a hanging aisle sign. If fill_ratio is given, render a compact
-            stock bar to the right of the sign text, flush inside the same pill."""
+        def draw_overhead_sign(cx, sign_y, text, bg_col, fill_ratio=None, text_col=(255,245,200)):
             lbl = font_sign.render(text, True, text_col)
             pad = 9
-            # Base sign width = text only; if stock bar wanted, widen to fit it
             bar_w_px = 48 if fill_ratio is not None else 0
-            bar_gap  = 6  if fill_ratio is not None else 0
-            sw = lbl.get_width() + pad * 2 + bar_w_px + bar_gap
-            sh = lbl.get_height() + 6
-            sx = cx - sw // 2
-            # hanging wire
-            pygame.draw.line(self.screen, (120, 120, 130), (cx, sign_y - 10), (cx, sign_y), 1)
-            # sign body
-            pygame.draw.rect(self.screen, bg_col, (sx, sign_y, sw, sh), border_radius=4)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in bg_col),
-                             (sx, sign_y, sw, sh), 2, border_radius=4)
-            self.screen.blit(lbl, (sx + pad, sign_y + 3))
-
-            # stock bar embedded in the sign
+            bar_gap  =  6 if fill_ratio is not None else 0
+            sw = lbl.get_width() + pad*2 + bar_w_px + bar_gap
+            sh = lbl.get_height() + 8
+            sx = cx - sw//2
+            pygame.draw.line(self.screen, (138,130,115), (cx, sign_y-12), (cx, sign_y), 1)
+            pygame.draw.rect(self.screen, bg_col, (sx, sign_y, sw, sh), border_radius=5)
+            pygame.draw.rect(self.screen, tuple(min(255,v+55) for v in bg_col),
+                             (sx+2, sign_y+1, sw-4, 3), border_radius=3)
+            pygame.draw.rect(self.screen, tuple(max(0,v-48) for v in bg_col),
+                             (sx, sign_y, sw, sh), 2, border_radius=5)
+            self.screen.blit(lbl, (sx+pad, sign_y+4))
             if fill_ratio is not None:
                 bx = sx + pad + lbl.get_width() + bar_gap
-                by = sign_y + sh // 2 - 4
-                bh = 8
-                # track
-                pygame.draw.rect(self.screen, (0, 0, 0, 60),
-                                 (bx, by, bar_w_px, bh), border_radius=4)
-                # fill colour: green > yellow > red
-                if fill_ratio > 0.5:
-                    fc = (80, 210, 100)
-                elif fill_ratio > 0.2:
-                    fc = (255, 185, 40)
-                else:
-                    fc = (220, 60, 60)
-                filled = max(2, int(bar_w_px * fill_ratio))
-                pygame.draw.rect(self.screen, fc,
-                                 (bx, by, filled, bh), border_radius=4)
-                # track border
-                pygame.draw.rect(self.screen, tuple(max(0, v - 50) for v in bg_col),
+                by = sign_y + sh//2 - 4; bh = 8
+                pygame.draw.rect(self.screen, (0,0,0,60), (bx, by, bar_w_px, bh), border_radius=4)
+                fc = (80,210,100) if fill_ratio > 0.5 else (255,185,40) if fill_ratio > 0.2 else (220,60,60)
+                pygame.draw.rect(self.screen, fc, (bx, by, max(2,int(bar_w_px*fill_ratio)), bh), border_radius=4)
+                pygame.draw.rect(self.screen, tuple(max(0,v-50) for v in bg_col),
                                  (bx, by, bar_w_px, bh), 1, border_radius=4)
 
         def draw_shelf_unit(sx, sy, sw, sh, products, layers=3):
-            pygame.draw.rect(self.screen, WOOD, (sx, sy, sw, sh), border_radius=5)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in WOOD), (sx + sw - 6, sy, 6, sh), border_radius=5)
-            layer_h = sh // (layers + 1)
+            _whi=(165,112,52); _wsd=(105,65,25)
+            for _wr in range(sh):
+                _wf = _wr/sh
+                pygame.draw.line(self.screen,
+                    (int(lerp(_whi[0],_wsd[0],_wf)), int(lerp(_whi[1],_wsd[1],_wf)), int(lerp(_whi[2],_wsd[2],_wf))),
+                    (sx, sy+_wr), (sx+sw, sy+_wr))
+            pygame.draw.rect(self.screen, _wsd, (sx+sw-7, sy, 7, sh))
+            pygame.draw.rect(self.screen, (185,128,62), (sx, sy, 3, sh))
+            layer_h = sh // (layers+1)
             for li in range(layers):
-                plank_y = sy + layer_h * (li + 1)
-                pygame.draw.rect(self.screen, SHELF, (sx + 4, plank_y, sw - 10, 8), border_radius=2)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in SHELF), (sx + 4, plank_y + 7, sw - 10, 2))
-                slot_w = max(1, (sw - 12) // max(1, len(products)))
-                for pi, (pcol, _) in enumerate(products):
-                    shimmer = int(math.sin(t * 2.0 + sx * 0.02 + pi + li) * 8)
-                    c = tuple(min(255, v + shimmer) for v in pcol)
-                    pygame.draw.rect(self.screen, c, (sx + 6 + pi * slot_w, plank_y - 19, slot_w - 1, 19), border_radius=2)
-                    pygame.draw.rect(self.screen, (255, 250, 180), (sx + 6 + pi * slot_w, plank_y - 3, slot_w - 1, 3))
+                plank_y = sy + layer_h*(li+1)
+                pygame.draw.rect(self.screen, (195,155,85), (sx+3, plank_y, sw-10, 9), border_radius=2)
+                pygame.draw.rect(self.screen, (215,182,108),(sx+3, plank_y, sw-10, 3), border_radius=2)
+                pygame.draw.rect(self.screen, (148,112,55), (sx+3, plank_y+6, sw-10, 3))
+                slot_w = max(1,(sw-14)//max(1,len(products)))
+                for pi,(pcol,_) in enumerate(products):
+                    shimmer = int(math.sin(t*1.8+sx*0.015+pi+li)*12)
+                    c   = tuple(min(255,v+shimmer) for v in pcol)
+                    hi  = tuple(min(255,v+55)      for v in c)
+                    shd = tuple(max(0,  v-35)      for v in c)
+                    px_x = sx+7+pi*slot_w
+                    pygame.draw.rect(self.screen, c,   (px_x, plank_y-20, slot_w-2, 20), border_radius=2)
+                    pygame.draw.rect(self.screen, hi,  (px_x, plank_y-20, slot_w-2,  5), border_radius=2)
+                    pygame.draw.rect(self.screen, shd, (px_x, plank_y- 6, slot_w-2,  6), border_radius=1)
+                    pygame.draw.rect(self.screen, (255,248,180), (px_x, plank_y-4, slot_w-2, 4))
 
-        # ── section layout (4 sections across the store width) ────────────
-        iw = floor.width
-        ix = floor.x
+        # ── Section layout — positions unchanged ──────────────────────────
+        iw = floor.width; ix = floor.x
         SIGN_Y       = floor_y + 4
         SHELF_STOP_Y = floor.bottom - 130
         CONTENT_Y    = floor_y + 30
@@ -2719,317 +2927,350 @@ class App:
         capacity = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
 
         def _section_fill(categories):
-            """Average fill ratio across a list of shelf categories."""
-            vals = [min(1.0, self.state.shelves.get(c, 0) / max(1, capacity))
-                    for c in categories]
-            return sum(vals) / max(1, len(vals))
+            vals = [min(1.0, self.state.shelves.get(c,0)/max(1,capacity)) for c in categories]
+            return sum(vals)/max(1,len(vals))
 
-        grocery_fill = _section_fill(["snack", "dairy", "produce"])
+        grocery_fill = _section_fill(["snack","dairy","produce"])
         frozen_fill  = _section_fill(["frozen"])
-        deli_fill    = _section_fill(["bakery", "deli"])
-        tech_fill    = _section_fill(["tech"])
+        deli_fill    = _section_fill(["bakery","deli"])
+        tech_fill    = _section_fill(["phone","laptop","router"])
 
-        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (60, 120, 60),   fill_ratio=grocery_fill)
-        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (30, 90, 160),   fill_ratio=frozen_fill)
-        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",    (160, 80, 40),   fill_ratio=deli_fill)
-        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",    (40, 40, 100),   fill_ratio=tech_fill)
+        draw_overhead_sign(SEC_GROCERY_CX, SIGN_Y, "GROCERY", (48,148,52),  fill_ratio=grocery_fill)
+        draw_overhead_sign(SEC_FROZEN_CX,  SIGN_Y, "FROZEN",  (28,88,185),  fill_ratio=frozen_fill)
+        draw_overhead_sign(SEC_DELI_CX,    SIGN_Y, "DELI",    (175,72,28),  fill_ratio=deli_fill)
+        draw_overhead_sign(SEC_TECH_CX,    SIGN_Y, "TECH",    (45,45,128),  fill_ratio=tech_fill)
 
-        # ── SECTION 1: Grocery shelves (live game state) ───────────────────
+        # ── SECTION 1: Grocery ────────────────────────────────────────────
         grocery_products = [
-            ((245, 180, 80), "chips"), ((195, 225, 255), "milk"),
-            ((214, 169, 111), "bread"), ((232, 86, 86), "apple"),
+            ((245,185,65),"chips"), ((185,225,255),"milk"),
+            ((218,165,95),"bread"), ((238,72,72),"apple"),
         ]
-        shelf_w  = 56
-        grocery_h = SHELF_STOP_Y - CONTENT_Y
-        draw_shelf_unit(SEC_GROCERY_CX - shelf_w // 2, CONTENT_Y, shelf_w, grocery_h, grocery_products, layers=4)
+        shelf_w = 56; grocery_h = SHELF_STOP_Y - CONTENT_Y
+        draw_shelf_unit(SEC_GROCERY_CX - shelf_w//2, CONTENT_Y, shelf_w, grocery_h, grocery_products, layers=4)
 
-        # ── SECTION 2: Frozen refrigerators ───────────────────────────────
-        frozen_defs = [
-            ((160, 210, 255), "Frz.Fruit"),
-            ((180, 240, 200), "Frz.Veg"),
-            ((255, 200, 180), "Frz.Prot"),
-        ]
-        fridge_w, fridge_h = 50, SHELF_STOP_Y - CONTENT_Y
-        fridge_gap = 6
-        frozen_x0 = SEC_FROZEN_CX - (len(frozen_defs) * (fridge_w + fridge_gap)) // 2 + fridge_gap
-        for fi, (fcol, fname) in enumerate(frozen_defs):
-            fx = frozen_x0 + fi * (fridge_w + fridge_gap)
-            fy = CONTENT_Y
-            CASE_COL  = (44, 74, 108)
-            CASE_DARK = (30, 52, 80)
-            pygame.draw.rect(self.screen, CASE_COL, (fx, fy, fridge_w, fridge_h), border_radius=5)
-            pygame.draw.rect(self.screen, CASE_DARK, (fx, fy, 5, fridge_h), border_radius=5)
-            pygame.draw.rect(self.screen, CASE_DARK, (fx + fridge_w - 5, fy, 5, fridge_h), border_radius=5)
-            pygame.draw.rect(self.screen, (60, 100, 145), (fx, fy, fridge_w, 8), border_radius=5)
-            pygame.draw.rect(self.screen, (30, 50, 75), (fx, fy + fridge_h - 8, fridge_w, 8), border_radius=3)
-            GLASS_MARGIN = 6
-            gx2, gy2 = fx + GLASS_MARGIN, fy + 10
-            gw2, gh2 = fridge_w - GLASS_MARGIN * 2, fridge_h - 22
-            glass_surf = pygame.Surface((gw2, gh2), pygame.SRCALPHA)
-            glass_surf.fill((200, 235, 255, 55))
-            self.screen.blit(glass_surf, (gx2, gy2))
-            pygame.draw.rect(self.screen, (55, 90, 130), (gx2, gy2, gw2, gh2), 2, border_radius=3)
-            item_rows = 4
-            row_h = (gh2 - 8) // item_rows
+        # ── SECTION 2: Frozen fridges ─────────────────────────────────────
+        frozen_defs = [((148,208,255),"Fruit"), ((165,242,192),"Veg  "), ((255,195,172),"Prot ")]
+        fridge_w=50; fridge_h=SHELF_STOP_Y-CONTENT_Y; fridge_gap=6
+        frozen_x0 = SEC_FROZEN_CX - (len(frozen_defs)*(fridge_w+fridge_gap))//2 + fridge_gap
+        for fi,(fcol,fname) in enumerate(frozen_defs):
+            fx=frozen_x0+fi*(fridge_w+fridge_gap); fy=CONTENT_Y
+            _CHI=(58,95,145); _CSD=(28,50,82)
+            for _fr in range(fridge_h):
+                _ff=_fr/fridge_h
+                pygame.draw.line(self.screen,
+                    (int(lerp(_CHI[0],_CSD[0],_ff)),int(lerp(_CHI[1],_CSD[1],_ff)),int(lerp(_CHI[2],_CSD[2],_ff))),
+                    (fx,fy+_fr),(fx+fridge_w,fy+_fr))
+            pygame.draw.rect(self.screen,_CSD,(fx,fy,5,fridge_h))
+            pygame.draw.rect(self.screen,_CSD,(fx+fridge_w-5,fy,5,fridge_h))
+            pygame.draw.rect(self.screen,(72,118,172),(fx,fy,fridge_w,9),border_radius=4)
+            pygame.draw.rect(self.screen,(88,138,192),(fx,fy,fridge_w,3),border_radius=4)
+            pygame.draw.rect(self.screen,_CSD,(fx,fy+fridge_h-9,fridge_w,9),border_radius=3)
+            GLASS_MARGIN=6; gx2=fx+GLASS_MARGIN; gy2=fy+11
+            gw2=fridge_w-GLASS_MARGIN*2; gh2=fridge_h-24
+            gs=pygame.Surface((gw2,gh2),pygame.SRCALPHA); gs.fill((215,242,255,48))
+            self.screen.blit(gs,(gx2,gy2))
+            pygame.draw.rect(self.screen,(68,108,158),(gx2,gy2,gw2,gh2),2,border_radius=3)
+            pygame.draw.line(self.screen,(255,255,255),(gx2+2,gy2+2),(gx2+2,gy2+18),1)
+            pygame.draw.line(self.screen,(255,255,255),(gx2+2,gy2+2),(gx2+gw2-4,gy2+2),1)
+            item_rows=4; row_h=(gh2-8)//item_rows
             for ri in range(item_rows):
-                ry2 = gy2 + 4 + ri * row_h
-                pygame.draw.rect(self.screen, (60, 100, 140), (gx2 + 2, ry2 + row_h - 4, gw2 - 4, 4))
-                shimmer = int(math.sin(t * 1.8 + fi * 2 + ri) * 6)
-                ic = tuple(min(255, v + shimmer) for v in fcol)
-                pygame.draw.rect(self.screen, ic, (gx2 + 3, ry2 + 2, gw2 - 6, row_h - 8), border_radius=2)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 40) for v in ic), (gx2 + 3, ry2 + 2, gw2 - 6, row_h - 8), 1, border_radius=2)
-                pygame.draw.rect(self.screen, (255, 250, 180), (gx2 + 3, ry2 + row_h - 9, gw2 - 6, 4))
-                item_lbl = font_sec.render(fname[:4], True, (40, 40, 60))
-                self.screen.blit(item_lbl, (gx2 + max(1, gw2 // 2 - item_lbl.get_width() // 2), ry2 + 3))
-            hx = fx + fridge_w - GLASS_MARGIN - 4
-            pygame.draw.rect(self.screen, (180, 190, 200), (hx, fy + fridge_h // 2 - 20, 5, 40), border_radius=3)
-            led_x, led_y = fx + 8, fy + 1
-            pygame.draw.rect(self.screen, (10, 20, 35), (led_x, led_y, fridge_w - 16, 7), border_radius=2)
-            temp_glow = int((math.sin(t * 2.0 + fi) + 1) * 4)
-            pygame.draw.rect(self.screen, (0, min(255, 180 + temp_glow), 80), (led_x + 2, led_y + 1, 18, 5), border_radius=1)
+                ry2=gy2+4+ri*row_h
+                pygame.draw.rect(self.screen,(62,105,155),(gx2+2,ry2+row_h-5,gw2-4,5))
+                shimmer=int(math.sin(t*1.6+fi*2+ri)*14)
+                ic=tuple(min(255,v+shimmer) for v in fcol)
+                hi_ic=tuple(min(255,v+55) for v in ic)
+                pygame.draw.rect(self.screen,ic,(gx2+3,ry2+2,gw2-6,row_h-8),border_radius=2)
+                pygame.draw.rect(self.screen,hi_ic,(gx2+3,ry2+2,gw2-6,4),border_radius=2)
+                pygame.draw.rect(self.screen,tuple(max(0,v-40) for v in ic),(gx2+3,ry2+2,gw2-6,row_h-8),1,border_radius=2)
+                pygame.draw.rect(self.screen,(255,248,180),(gx2+3,ry2+row_h-10,gw2-6,4))
+                lbl2=font_sec.render(fname[:4],True,(35,38,62))
+                self.screen.blit(lbl2,(gx2+max(1,gw2//2-lbl2.get_width()//2),ry2+3))
+            hx=fx+fridge_w-GLASS_MARGIN-5
+            pygame.draw.rect(self.screen,(195,205,218),(hx,fy+fridge_h//2-22,6,44),border_radius=3)
+            pygame.draw.rect(self.screen,(225,232,242),(hx+1,fy+fridge_h//2-22,2,44),border_radius=2)
+            led_x=fx+8; led_y=fy+2
+            pygame.draw.rect(self.screen,(8,18,32),(led_x,led_y,fridge_w-16,8),border_radius=2)
+            tglow=int((math.sin(t*2.0+fi)+1)*5)
+            pygame.draw.rect(self.screen,(0,min(255,188+tglow),88),(led_x+2,led_y+2,20,4),border_radius=1)
 
-        # ── SECTION 3: Deli counter ────────────────────────────────────────
-        deli_w  = 82
-        deli_x0 = SEC_DELI_CX - deli_w // 2
-        BACK_H  = SHELF_STOP_Y - CONTENT_Y
-        back_shelf_col = (170, 140, 100)
-        pygame.draw.rect(self.screen, back_shelf_col, (deli_x0, CONTENT_Y, deli_w, BACK_H), border_radius=4)
-        deli_items = [
-            ((214, 169, 111), "Bread"),
-            ((255, 200, 120), "Donut"),
-            ((210, 140, 160), "Cake"),
-        ]
-        tier_rows = 4
-        tier_h = BACK_H // (tier_rows + 1)
+        # ── SECTION 3: Deli ───────────────────────────────────────────────
+        deli_w=82; deli_x0=SEC_DELI_CX-deli_w//2; BACK_H=SHELF_STOP_Y-CONTENT_Y
+        for _dr in range(BACK_H):
+            _df=_dr/BACK_H
+            pygame.draw.line(self.screen,
+                (int(lerp(185,148,_df)),int(lerp(148,112,_df)),int(lerp(105,78,_df))),
+                (deli_x0,CONTENT_Y+_dr),(deli_x0+deli_w,CONTENT_Y+_dr))
+        deli_items = [((218,172,105),"Bread"),((255,198,108),"Donut"),((218,135,162),"Cake")]
+        tier_rows=4; tier_h=BACK_H//(tier_rows+1)
         for tr in range(tier_rows):
-            ty2 = CONTENT_Y + tier_h * (tr + 1)
-            pygame.draw.rect(self.screen, (200, 170, 125), (deli_x0 + 3, ty2, deli_w - 6, 5), border_radius=2)
+            ty2=CONTENT_Y+tier_h*(tr+1)
+            pygame.draw.rect(self.screen,(210,175,122),(deli_x0+2,ty2,deli_w-4,6),border_radius=2)
+            pygame.draw.rect(self.screen,(228,198,148),(deli_x0+2,ty2,deli_w-4,2),border_radius=2)
             for tpi in range(3):
-                tcol, _ = deli_items[tpi % len(deli_items)]
-                shimmer = int(math.sin(t * 1.5 + tr + tpi) * 8)
-                tc = tuple(min(255, v + shimmer) for v in tcol)
-                pygame.draw.ellipse(self.screen, tc, (deli_x0 + 6 + tpi * 24, ty2 - 14, 22, 13))
-        COUNTER_H = 58
-        counter_y2 = CONTENT_Y + BACK_H - COUNTER_H - 2
-        pygame.draw.rect(self.screen, (160, 130, 95), (deli_x0, counter_y2 + 20, deli_w, COUNTER_H), border_radius=5)
-        pygame.draw.rect(self.screen, (170, 210, 245), (deli_x0 + 2, counter_y2, deli_w - 4, 24), border_radius=3)
-        pygame.draw.rect(self.screen, (120, 175, 220), (deli_x0 + 2, counter_y2, deli_w - 4, 24), 2, border_radius=3)
-        for di, (dcol, dname) in enumerate(deli_items):
-            ddx = deli_x0 + 6 + di * 24
-            pygame.draw.ellipse(self.screen, dcol, (ddx, counter_y2 + 5, 20, 13))
-            dlbl = get_font(8).render(dname, True, (70, 50, 30))
-            self.screen.blit(dlbl, (ddx + 10 - dlbl.get_width() // 2, counter_y2 + 20))
-        pygame.draw.rect(self.screen, (200, 175, 130), (deli_x0, counter_y2 + 18, deli_w, 6), border_radius=2)
+                tcol,_=deli_items[tpi%len(deli_items)]
+                shimmer=int(math.sin(t*1.4+tr+tpi)*12)
+                tc=tuple(min(255,v+shimmer) for v in tcol)
+                hi3=tuple(min(255,v+50) for v in tc)
+                cx3=deli_x0+7+tpi*24
+                pygame.draw.ellipse(self.screen,tc,(cx3,ty2-15,21,14))
+                pygame.draw.ellipse(self.screen,hi3,(cx3+2,ty2-14,8,5))
+        COUNTER_H=58; counter_y2=CONTENT_Y+BACK_H-COUNTER_H-2
+        for _cr in range(COUNTER_H):
+            _cf=_cr/COUNTER_H
+            pygame.draw.line(self.screen,
+                (int(lerp(172,138,_cf)),int(lerp(138,108,_cf)),int(lerp(100,75,_cf))),
+                (deli_x0, counter_y2+20+min(_cr,COUNTER_H-20)),
+                (deli_x0+deli_w, counter_y2+20+min(_cr,COUNTER_H-20)))
+        _gs2=pygame.Surface((deli_w-4,26),pygame.SRCALPHA); _gs2.fill((175,218,252,72))
+        self.screen.blit(_gs2,(deli_x0+2,counter_y2))
+        pygame.draw.rect(self.screen,(125,182,228),(deli_x0+2,counter_y2,deli_w-4,26),2,border_radius=3)
+        pygame.draw.line(self.screen,(215,238,255),(deli_x0+4,counter_y2+2),(deli_x0+deli_w-6,counter_y2+2),1)
+        for di,(dcol,dname) in enumerate(deli_items):
+            ddx=deli_x0+5+di*24
+            pygame.draw.ellipse(self.screen,dcol,(ddx,counter_y2+5,21,14))
+            pygame.draw.ellipse(self.screen,tuple(min(255,v+45) for v in dcol),(ddx+2,counter_y2+6,8,5))
+            dlbl=get_font(8).render(dname,True,(72,48,28))
+            self.screen.blit(dlbl,(ddx+10-dlbl.get_width()//2,counter_y2+21))
+        pygame.draw.rect(self.screen,(215,185,135),(deli_x0,counter_y2+18,deli_w,7),border_radius=2)
+        pygame.draw.rect(self.screen,(235,210,160),(deli_x0,counter_y2+18,deli_w,2),border_radius=1)
 
-        # ── SECTION 4: Tech aisles ─────────────────────────────────────────
-        TECH_STOP_Y  = SHELF_STOP_Y - 60
-        tech_aisle_h = TECH_STOP_Y - CONTENT_Y
-        tech_aisles = [(-72, "AISLE A"), (0, "AISLE B"), (72, "AISLE C")]
-        tech_device_rows = [
-            ((55,  55,  68), (90,  170, 255), "PHONE",  14, 22),
-            ((38,  38,  48), (130, 215, 255), "LAPTOP", 38, 24),
-            ((175, 175, 195), (70, 190, 255), "ROUTER", 28, 17),
+        # ── SECTION 4: Tech ───────────────────────────────────────────────
+        TECH_STOP_Y=SHELF_STOP_Y-60; tech_aisle_h=TECH_STOP_Y-CONTENT_Y
+        tech_aisles=[(-72,"AISLE A"),(0,"AISLE B"),(72,"AISLE C")]
+        tech_device_rows=[
+            ((52,52,65),(88,172,255),"PHONE",14,22),
+            ((36,36,46),(128,218,255),"LAPTOP",38,24),
+            ((172,172,192),(68,192,255),"ROUTER",28,17),
         ]
-        for ai, (ax_off, alabel) in enumerate(tech_aisles):
-            shelf_ax = SEC_TECH_CX + ax_off
-            shelf_aw = 54
-            pygame.draw.rect(self.screen, WOOD, (shelf_ax - shelf_aw // 2, CONTENT_Y, shelf_aw, tech_aisle_h), border_radius=4)
-            pygame.draw.rect(self.screen, tuple(max(0, v - 25) for v in WOOD), (shelf_ax + shelf_aw // 2 - 6, CONTENT_Y, 6, tech_aisle_h), border_radius=4)
-            num_rows = len(tech_device_rows)
-            row_zone_h = tech_aisle_h // (num_rows + 1)
-            for ri, (bcol, scol, dname, dw, dh) in enumerate(tech_device_rows):
-                plank_y = CONTENT_Y + row_zone_h * (ri + 1)
-                pygame.draw.rect(self.screen, SHELF, (shelf_ax - shelf_aw // 2 + 3, plank_y, shelf_aw - 6, 7), border_radius=2)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in SHELF), (shelf_ax - shelf_aw // 2 + 3, plank_y + 6, shelf_aw - 6, 2))
-                tx2 = shelf_ax - dw // 2
-                ty2 = plank_y - dh - 4
-                sglow = int((math.sin(t * 2.8 + ai * 1.1 + ri * 0.9) + 1) * 12)
-                halo_surf = pygame.Surface((dw + 10, dh + 10), pygame.SRCALPHA)
-                pygame.draw.rect(halo_surf, (*scol, 35 + sglow), halo_surf.get_rect(), border_radius=5)
-                self.screen.blit(halo_surf, (tx2 - 5, ty2 - 5))
-                pygame.draw.rect(self.screen, bcol, (tx2, ty2, dw, dh), border_radius=3)
-                pygame.draw.rect(self.screen, (20, 20, 30), (tx2 + 2, ty2 + 2, dw - 4, dh - 5), border_radius=2)
-                sc2 = tuple(min(255, v + sglow) for v in scol)
-                pygame.draw.rect(self.screen, sc2, (tx2 + 3, ty2 + 3, dw - 6, dh - 8), border_radius=2)
+        for ai,(ax_off,_alabel) in enumerate(tech_aisles):
+            shelf_ax=SEC_TECH_CX+ax_off; shelf_aw=54
+            for _tr in range(tech_aisle_h):
+                _tf=_tr/tech_aisle_h; _ts=int(lerp(62,42,_tf))
+                pygame.draw.line(self.screen,(_ts,max(0,_ts-4),_ts+8),
+                    (shelf_ax-shelf_aw//2,CONTENT_Y+_tr),(shelf_ax+shelf_aw//2,CONTENT_Y+_tr))
+            pygame.draw.rect(self.screen,(28,24,38),(shelf_ax+shelf_aw//2-7,CONTENT_Y,7,tech_aisle_h))
+            pygame.draw.rect(self.screen,(85,82,105),(shelf_ax-shelf_aw//2,CONTENT_Y,3,tech_aisle_h))
+            row_zone_h=tech_aisle_h//(len(tech_device_rows)+1)
+            for ri,(bcol,scol,dname,dw,dh) in enumerate(tech_device_rows):
+                plank_y=CONTENT_Y+row_zone_h*(ri+1)
+                pygame.draw.rect(self.screen,(138,145,162),(shelf_ax-shelf_aw//2+3,plank_y,shelf_aw-6,8),border_radius=2)
+                pygame.draw.rect(self.screen,(175,182,198),(shelf_ax-shelf_aw//2+3,plank_y,shelf_aw-6,3),border_radius=2)
+                pygame.draw.rect(self.screen,(105,110,125),(shelf_ax-shelf_aw//2+3,plank_y+5,shelf_aw-6,3))
+                tx2=shelf_ax-dw//2; ty2=plank_y-dh-4
+                sglow=int((math.sin(t*2.5+ai*1.2+ri*0.8)+1)*18)
+                halo=pygame.Surface((dw+16,dh+16),pygame.SRCALPHA)
+                _gc=tuple(min(255,v+sglow) for v in scol)
+                pygame.draw.rect(halo,(*_gc,55+sglow//2),halo.get_rect(),border_radius=6)
+                self.screen.blit(halo,(tx2-8,ty2-8))
+                pygame.draw.rect(self.screen,bcol,(tx2,ty2,dw,dh),border_radius=3)
+                pygame.draw.rect(self.screen,tuple(min(255,v+28) for v in bcol),(tx2,ty2,dw,5),border_radius=3)
+                pygame.draw.rect(self.screen,(15,18,28),(tx2+2,ty2+2,dw-4,dh-5),border_radius=2)
+                sc2=tuple(min(255,v+sglow) for v in scol)
+                pygame.draw.rect(self.screen,sc2,(tx2+3,ty2+3,dw-6,dh-8),border_radius=2)
+                pygame.draw.line(self.screen,(255,255,255),(tx2+4,ty2+4),(tx2+dw-6,ty2+4),1)
                 for bar_i in range(2):
-                    bar_y2 = ty2 + 5 + bar_i * 5
-                    bar_col = (255, 255, 255) if (int(t * 2 + bar_i + ri) % 4 < 2) else (180, 220, 255)
-                    pygame.draw.rect(self.screen, bar_col, (tx2 + 4, bar_y2, dw - 10, 2), border_radius=1)
-                pygame.draw.rect(self.screen, tuple(max(0, v - 20) for v in bcol), (tx2, ty2, dw, dh), 1, border_radius=3)
-                dlbl = font_sec.render(dname, True, (190, 200, 220))
-                self.screen.blit(dlbl, (tx2 + dw // 2 - dlbl.get_width() // 2, plank_y + 8))
-            pygame.draw.rect(self.screen, (255, 250, 180), (shelf_ax - shelf_aw // 2 + 3, TECH_STOP_Y - 10, shelf_aw - 6, 6), border_radius=2)
+                    bar_col=(255,255,255) if (int(t*2.2+bar_i+ri)%4<2) else (180,225,255)
+                    pygame.draw.rect(self.screen,bar_col,(tx2+4,ty2+5+bar_i*5,dw-10,2),border_radius=1)
+                pygame.draw.rect(self.screen,tuple(max(0,v-22) for v in bcol),(tx2,ty2,dw,dh),1,border_radius=3)
+                dlbl=font_sec.render(dname,True,(195,205,225))
+                self.screen.blit(dlbl,(tx2+dw//2-dlbl.get_width()//2,plank_y+9))
+            pygame.draw.rect(self.screen,(255,248,180),(shelf_ax-shelf_aw//2+3,TECH_STOP_Y-10,shelf_aw-6,6),border_radius=2)
 
-        # ── checkout register (bottom-right, matching preview) ─────────────
-        counter_rect = pygame.Rect(floor.right - 175, floor.bottom - 108, 130, 72)
-        pygame.draw.rect(self.screen, REGISTER, counter_rect, border_radius=7)
-        pygame.draw.rect(self.screen, (55, 65, 75), counter_rect, 2, border_radius=7)
-        scr_glow = int((math.sin(t * 3.0) + 1) * 18)
-        pygame.draw.rect(self.screen, (0, min(255, 150 + scr_glow), min(255, 55 + scr_glow)),
-                         (counter_rect.x + 7, counter_rect.y + 7, 44, 26), border_radius=3)
-        laser_y = counter_rect.y + 40 + int(math.sin(t * 6) * 5)
-        pygame.draw.line(self.screen, (255, 60, 60),
-                         (counter_rect.x + 54, laser_y), (counter_rect.right - 7, laser_y), 2)
-        belt_x = counter_rect.x + 54
+        # ── Checkout register ─────────────────────────────────────────────
+        counter_rect = pygame.Rect(floor.right-175, floor.bottom-108, 130, 72)
+        for _rr in range(counter_rect.height):
+            _rf=_rr/counter_rect.height
+            pygame.draw.line(self.screen,
+                (int(lerp(55,38,_rf)),int(lerp(68,48,_rf)),int(lerp(82,58,_rf))),
+                (counter_rect.x,counter_rect.y+_rr),(counter_rect.right,counter_rect.y+_rr))
+        pygame.draw.rect(self.screen,(62,72,88),counter_rect,2,border_radius=7)
+        pygame.draw.rect(self.screen,(78,92,112),(counter_rect.x,counter_rect.y,counter_rect.width,4),border_radius=7)
+        scr_glow=int((math.sin(t*2.8)+1)*22)
+        pygame.draw.rect(self.screen,(0,min(255,165+scr_glow),min(255,58+scr_glow)),
+                         (counter_rect.x+7,counter_rect.y+7,46,30),border_radius=3)
+        pygame.draw.rect(self.screen,(0,min(255,200+scr_glow),100),
+                         (counter_rect.x+8,counter_rect.y+8,20,8),border_radius=2)
+        laser_y=counter_rect.y+44+int(math.sin(t*5.5)*6)
+        pygame.draw.line(self.screen,(255,48,48),(counter_rect.x+56,laser_y),(counter_rect.right-7,laser_y),2)
+        pygame.draw.line(self.screen,(255,148,148),(counter_rect.x+56,laser_y-1),(counter_rect.right-7,laser_y-1),1)
+        belt_x=counter_rect.x+56
         for stripe in range(5):
-            sx2 = belt_x + stripe * 12 + int(t * 18) % 12
-            pygame.draw.line(self.screen, (70, 75, 80),
-                             (sx2, counter_rect.y + 34), (sx2, counter_rect.y + 56), 2)
+            sx2=belt_x+stripe*12+int(t*18)%12
+            pygame.draw.line(self.screen,(72,78,88),(sx2,counter_rect.y+34),(sx2,counter_rect.y+56),2)
+        pygame.draw.rect(self.screen,(88,95,108),(belt_x,counter_rect.y+33,counter_rect.right-7-belt_x,2))
+        pygame.draw.rect(self.screen,(88,95,108),(belt_x,counter_rect.y+57,counter_rect.right-7-belt_x,2))
 
-        # ── cart corral (bottom-left corner, matching preview) ─────────────
-        STACK_X = floor.x + 10
-        STACK_Y = floor.bottom - 90
+        # ── Cart corral ───────────────────────────────────────────────────
+        STACK_X=floor.x+10; STACK_Y=floor.bottom-90
 
-        def draw_single_cart(cx, cy, item_col=None, small=False):
-            s  = 0.62 if small else 1.0
-            bw = int(38 * s)
-            bh = int(24 * s)
-            dp = int(10 * s)
-            cx, cy = int(cx), int(cy)
-            metal_mid = (148, 158, 170)
-            metal_hi  = (200, 210, 218)
-            metal_shd = (90,  98, 108)
-            wheel_col = (42,  44,  54)
-            wheel_hi  = (75,  80,  92)
-            back_poly = [(cx + dp, cy - dp), (cx + bw + dp, cy - dp), (cx + bw, cy), (cx, cy)]
-            pygame.draw.polygon(self.screen, metal_shd, back_poly)
-            pygame.draw.polygon(self.screen, metal_mid, back_poly, 1)
-            pygame.draw.rect(self.screen, metal_mid, (cx, cy, bw, bh), border_radius=2)
-            grid_col = tuple(max(0, v - 28) for v in metal_mid)
-            for wx in range(cx + int(9*s), cx + bw, int(9*s)):
-                pygame.draw.line(self.screen, grid_col, (wx, cy + 2), (wx, cy + bh - 2), 1)
-            for wy in range(cy + int(8*s), cy + bh, int(8*s)):
-                pygame.draw.line(self.screen, grid_col, (cx + 2, wy), (cx + bw - 2, wy), 1)
-            pygame.draw.rect(self.screen, metal_hi, (cx, cy, bw, int(3*s)), border_radius=1)
-            side_poly = [(cx+bw, cy), (cx+bw+dp, cy-dp), (cx+bw+dp, cy-dp+bh), (cx+bw, cy+bh)]
-            pygame.draw.polygon(self.screen, metal_shd, side_poly)
-            pygame.draw.polygon(self.screen, metal_mid, side_poly, 1)
-            hbw = int(16 * s); hbh = int(5 * s)
-            hx2 = cx + bw - hbw - int(2*s) + dp; hy2 = cy - dp - hbh
-            pygame.draw.rect(self.screen, metal_hi, (hx2, hy2, hbw, hbh), border_radius=2)
-            pygame.draw.rect(self.screen, metal_mid, (hx2 + hbw - int(4*s), cy - dp, int(4*s), int(14*s)), border_radius=1)
-            pygame.draw.rect(self.screen, metal_shd, (cx - int(3*s), cy + int(5*s), int(4*s), int(15*s)), border_radius=1)
-            axle_y = cy + bh + int(2*s)
-            pygame.draw.line(self.screen, metal_mid, (cx + int(3*s), axle_y), (cx + int(3*s), axle_y + int(8*s)), 2)
-            pygame.draw.line(self.screen, metal_mid, (cx + bw - int(5*s), axle_y), (cx + bw - int(5*s), axle_y + int(8*s)), 2)
-            wr = max(2, int(4 * s))
-            wy2 = axle_y + int(8*s)
-            for wxp in [cx + int(2*s), cx + int(7*s), cx + bw - int(8*s), cx + bw - int(3*s)]:
-                pygame.draw.circle(self.screen, wheel_col, (wxp, wy2), wr)
-                pygame.draw.circle(self.screen, wheel_hi,  (wxp, wy2), max(1, wr - 1))
-                pygame.draw.circle(self.screen, metal_hi,  (wxp, wy2), max(1, wr - 2))
+        def draw_single_cart(cx,cy,item_col=None,small=False):
+            s=0.62 if small else 1.0
+            bw=int(38*s);bh=int(24*s);dp=int(10*s);cx,cy=int(cx),int(cy)
+            metal_hi=(205,215,225);metal_mid=(152,162,175);metal_shd=(92,100,112)
+            wheel_col=(42,44,55);wheel_hi=(78,82,95)
+            back_poly=[(cx+dp,cy-dp),(cx+bw+dp,cy-dp),(cx+bw,cy),(cx,cy)]
+            pygame.draw.polygon(self.screen,metal_shd,back_poly)
+            pygame.draw.polygon(self.screen,metal_mid,back_poly,1)
+            pygame.draw.rect(self.screen,metal_mid,(cx,cy,bw,bh),border_radius=2)
+            pygame.draw.rect(self.screen,metal_hi,(cx,cy,bw,int(3*s)),border_radius=1)
+            grid_col=tuple(max(0,v-30) for v in metal_mid)
+            for wx in range(cx+int(9*s),cx+bw,int(9*s)):
+                pygame.draw.line(self.screen,grid_col,(wx,cy+2),(wx,cy+bh-2),1)
+            for wy in range(cy+int(8*s),cy+bh,int(8*s)):
+                pygame.draw.line(self.screen,grid_col,(cx+2,wy),(cx+bw-2,wy),1)
+            side_poly=[(cx+bw,cy),(cx+bw+dp,cy-dp),(cx+bw+dp,cy-dp+bh),(cx+bw,cy+bh)]
+            pygame.draw.polygon(self.screen,metal_shd,side_poly)
+            pygame.draw.polygon(self.screen,metal_mid,side_poly,1)
+            hbw=int(16*s);hbh=int(5*s)
+            hx2=cx+bw-hbw-int(2*s)+dp;hy2=cy-dp-hbh
+            pygame.draw.rect(self.screen,metal_hi,(hx2,hy2,hbw,hbh),border_radius=2)
+            pygame.draw.rect(self.screen,metal_mid,(hx2+hbw-int(4*s),cy-dp,int(4*s),int(14*s)),border_radius=1)
+            pygame.draw.rect(self.screen,metal_shd,(cx-int(3*s),cy+int(5*s),int(4*s),int(15*s)),border_radius=1)
+            axle_y=cy+bh+int(2*s)
+            for axle_x in [cx+int(3*s),cx+bw-int(5*s)]:
+                pygame.draw.line(self.screen,metal_mid,(axle_x,axle_y),(axle_x,axle_y+int(8*s)),2)
+            wr=max(2,int(4*s));wy2=axle_y+int(8*s)
+            for wxp in [cx+int(2*s),cx+int(7*s),cx+bw-int(8*s),cx+bw-int(3*s)]:
+                pygame.draw.circle(self.screen,wheel_col,(wxp,wy2),wr)
+                pygame.draw.circle(self.screen,wheel_hi,(wxp,wy2),max(1,wr-1))
+                pygame.draw.circle(self.screen,metal_hi,(wxp,wy2),max(1,wr-2))
+            if item_col:
+                pad2=int(5*s);iw4=bw-pad2*2;ih4=int((bh-pad2)*0.55)
+                pygame.draw.rect(self.screen,item_col,(cx+pad2,cy+pad2,iw4,ih4),border_radius=2)
+                pygame.draw.rect(self.screen,tuple(min(255,v+45) for v in item_col),(cx+pad2,cy+pad2,iw4,int(ih4*0.4)),border_radius=2)
 
         for si in range(3):
-            draw_single_cart(STACK_X + si * 6, STACK_Y - si * 3, small=True)
-        cl = font_sec.render("CARTS", True, (140, 148, 158))
-        self.screen.blit(cl, (STACK_X + 2, STACK_Y + 28))
+            draw_single_cart(STACK_X+si*6, STACK_Y-si*3, small=True)
+        cl=font_sec.render("CARTS",True,(140,148,158))
+        self.screen.blit(cl,(STACK_X+2,STACK_Y+28))
 
-        # ── interactive zone overlays (zones with glow, label, and "Press E") ──
+        # ── Zone overlays (Press E — unchanged) ──────────────────────────
         zone_colors = {
-            "stock":    (214, 236, 244),
-            "checkout": (214, 222, 248),
-            "manager":  (229, 220, 255),
-            "prices":   (223, 242, 220),
-            "break":    (251, 234, 209),
+            "stock":    (214,236,244), "checkout": (214,222,248),
+            "manager":  (229,220,255), "prices":   (223,242,220), "break": (251,234,209),
         }
-        for name, rect in self.zone_rects.items():
-            pygame.draw.rect(self.screen, zone_colors[name], rect, border_radius=20)
-            pygame.draw.rect(self.screen, (255, 255, 255), rect, 2, border_radius=20)
-            glow = pygame.Surface((rect.width + 30, rect.height + 30), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*ZONE_GLOW, 28), glow.get_rect(), border_radius=26)
-            self.screen.blit(glow, (rect.x - 15, rect.y - 15))
-            draw_text(self.screen, name.title(), rect.center, size=BODY_SIZE, color=TEXT_DARK, bold=True, center=True)
-            draw_text(self.screen, "Press E", (rect.centerx, rect.bottom - 18), size=SMALL_SIZE, color=(78, 88, 118), center=True)
+        for name,rect in self.zone_rects.items():
+            pygame.draw.rect(self.screen,zone_colors[name],rect,border_radius=20)
+            pygame.draw.rect(self.screen,(255,255,255),rect,2,border_radius=20)
+            glow=pygame.Surface((rect.width+30,rect.height+30),pygame.SRCALPHA)
+            pygame.draw.rect(glow,(*ZONE_GLOW,28),glow.get_rect(),border_radius=26)
+            self.screen.blit(glow,(rect.x-15,rect.y-15))
+            draw_text(self.screen,name.title(),rect.center,size=BODY_SIZE,color=TEXT_DARK,bold=True,center=True)
+            draw_text(self.screen,"Press E",(rect.centerx,rect.bottom-18),size=SMALL_SIZE,color=(78,88,118),center=True)
 
-        # ── gameplay shelf interaction hints (critical-low flash only — bars now on signs) ──
-        labels = list(SHELF_LAYOUT.keys())
-        for i, rect in enumerate(self.shelf_hitboxes()):
-            category   = labels[i]
-            capacity   = SHELF_CAPACITY + (8 if self.state.upgrades.get("shelves") else 0)
-            qty        = self.state.shelves.get(category, 0)
-            fill_ratio = min(1.0, qty / max(1, capacity))
-
-            # Critical-low flash only
+        # ── Shelf critical-low flash ──────────────────────────────────────
+        labels=list(SHELF_LAYOUT.keys())
+        for i,rect in enumerate(self.shelf_hitboxes()):
+            category=labels[i]
+            capacity=SHELF_CAPACITY+(8 if self.state.upgrades.get("shelves") else 0)
+            qty=self.state.shelves.get(category,0)
+            fill_ratio=min(1.0,qty/max(1,capacity))
             if fill_ratio < 0.15:
-                pulse_a = int(abs(math.sin(t * 4)) * 60)
-                warn_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-                pygame.draw.rect(warn_surf, (*DANGER, pulse_a), warn_surf.get_rect(), border_radius=8)
-                self.screen.blit(warn_surf, rect.topleft)
+                pulse_a=int(abs(math.sin(t*4))*60)
+                warn_surf=pygame.Surface((rect.width,rect.height),pygame.SRCALPHA)
+                pygame.draw.rect(warn_surf,(*DANGER,pulse_a),warn_surf.get_rect(),border_radius=8)
+                self.screen.blit(warn_surf,rect.topleft)
 
-        # ── animated walk characters: customers always walk; staff only if hired ─
+        # ── Characters — enhanced matching login screen style ─────────────
         def draw_person_walk_game(px_pos, py_pos, body_color, hat_color, label,
                                   carrying, walk_phase, facing_down, paused,
-                                  skin_tone=(224, 190, 155), hair_color=(60, 40, 25),
-                                  pant_color=(45, 50, 75), shoe_color=(32, 22, 16)):
-            px_pos, py_pos = int(px_pos), int(py_pos)
-            bob   = 0 if paused else int(math.sin(walk_phase * 2) * 2.2)
+                                  skin_tone=(228,192,152), hair_color=(58,38,22),
+                                  pant_color=(48,52,78), shoe_color=(30,22,14)):
+            px_pos,py_pos=int(px_pos),int(py_pos)
+            bob   = 0   if paused else int(math.sin(walk_phase*2)*2.5)
             swing = 0.0 if paused else math.sin(walk_phase)
+            a_sw  = 0.0 if paused else math.sin(walk_phase+math.pi)
 
-            # ground shadow
-            shadow_surf = pygame.Surface((34, 10), pygame.SRCALPHA)
-            for sx in range(17):
-                alpha = int(90 * (1 - (sx / 17) ** 1.6))
-                pygame.draw.line(shadow_surf, (0, 0, 0, alpha), (17 - sx, 5), (17 + sx, 5), 1)
-            self.screen.blit(shadow_surf, (px_pos - 17, py_pos + 22))
+            # Ground shadow
+            shad_s=pygame.Surface((36,10),pygame.SRCALPHA)
+            for sxi in range(18):
+                alp=int(95*(1-(sxi/18)**1.5))
+                pygame.draw.line(shad_s,(0,0,0,alp),(18-sxi,5),(18+sxi,5),1)
+            self.screen.blit(shad_s,(px_pos-18,py_pos+23))
 
-            # legs
-            for li, (lx, lsw) in enumerate([(-4, swing), (3, -swing)]):
-                depth = li == 0
-                ly_extra = int(lsw * 8)
-                leg_shade = tuple(max(0, v - (18 if depth else 0)) for v in pant_color)
-                pygame.draw.rect(self.screen, leg_shade, (px_pos + lx - 1, py_pos + 8 + bob, 6, 7), border_radius=3)
-                pygame.draw.rect(self.screen, leg_shade, (px_pos + lx, py_pos + 14 + bob + ly_extra, 5, 6), border_radius=2)
-                shoe_x = px_pos + lx - (1 if facing_down else 0)
-                shoe_y = py_pos + 19 + bob + ly_extra
-                pygame.draw.rect(self.screen, shoe_color, (shoe_x, shoe_y, 8, 4), border_radius=2)
+            # Legs with depth shading + highlight
+            for li,(lx,lsw) in enumerate([(-4,swing),(3,-swing)]):
+                depth=li==0; ly_e=int(lsw*8)
+                pshd=tuple(max(0,v-(22 if depth else 0)) for v in pant_color)
+                pygame.draw.rect(self.screen,pshd,(px_pos+lx-1,py_pos+8+bob,6,7),border_radius=3)
+                pygame.draw.rect(self.screen,pshd,(px_pos+lx,py_pos+14+bob+ly_e,5,6),border_radius=2)
+                sx4=px_pos+lx-(1 if facing_down else 0); sy4=py_pos+19+bob+ly_e
+                pygame.draw.rect(self.screen,shoe_color,(sx4,sy4,8,4),border_radius=2)
+                pygame.draw.line(self.screen,tuple(min(255,v+28) for v in shoe_color),
+                                 (sx4+1,sy4+1),(sx4+6,sy4+1),1)
 
-            # torso
-            torso_x, torso_y = px_pos - 8, py_pos - 8 + bob
-            pygame.draw.rect(self.screen, body_color, (torso_x, torso_y, 16, 17), border_radius=4)
-            shadow_col = tuple(max(0, v - 38) for v in body_color)
-            pygame.draw.rect(self.screen, shadow_col, (torso_x + 11, torso_y + 2, 4, 13), border_radius=2)
+            # Torso with highlight + shadow strips
+            tx4,ty4=px_pos-8,py_pos-8+bob
+            pygame.draw.rect(self.screen,body_color,(tx4,ty4,16,17),border_radius=4)
+            pygame.draw.rect(self.screen,tuple(max(0,v-42) for v in body_color),(tx4+11,ty4+2,4,13),border_radius=2)
+            pygame.draw.rect(self.screen,tuple(min(255,v+45) for v in body_color),(tx4+2,ty4+1,4,8),border_radius=2)
+            pygame.draw.line(self.screen,tuple(min(255,v+60) for v in body_color),(tx4+3,ty4+2),(tx4+12,ty4+2),1)
 
-            # head
-            pygame.draw.circle(self.screen, skin_tone, (px_pos, py_pos - 16 + bob), 7)
-            # hat
+            # Arms
+            arm_shd=tuple(max(0,v-25) for v in body_color)
+            skin_arm=tuple(max(0,v-18) for v in skin_tone)
+            bax=px_pos-14; bay=py_pos-5+int(a_sw*7)+bob
+            pygame.draw.rect(self.screen,arm_shd,(bax,bay,6,11),border_radius=3)
+            pygame.draw.rect(self.screen,skin_arm,(bax+1,bay+8,4,4),border_radius=2)
+            fax=px_pos+8; fay=py_pos-5+int(-a_sw*7)+bob
+            pygame.draw.rect(self.screen,arm_shd,(fax,fay,6,11),border_radius=3)
+            pygame.draw.rect(self.screen,skin_arm,(fax+1,fay+8,4,4),border_radius=2)
+
+            # Head with skin shading + hair
+            hx4,hy4=px_pos,py_pos-20+bob; head_r=8
+            pygame.draw.rect(self.screen,skin_tone,(hx4-3,hy4+head_r-2,6,5),border_radius=2)
+            pygame.draw.circle(self.screen,skin_tone,(hx4,hy4),head_r)
+            pygame.draw.circle(self.screen,tuple(min(255,v+22) for v in skin_tone),(hx4-2,hy4-2),3)
+            pygame.draw.circle(self.screen,(238,172,148),(hx4-4,hy4+2),3)
+            pygame.draw.circle(self.screen,(238,172,148),(hx4+4,hy4+2),3)
+            pygame.draw.ellipse(self.screen,hair_color,(hx4-head_r,hy4-head_r,head_r*2,head_r+2))
+            pygame.draw.rect(self.screen,hair_color,(hx4-head_r-1,hy4-2,3,5),border_radius=1)
+            pygame.draw.rect(self.screen,hair_color,(hx4+head_r-2,hy4-2,3,5),border_radius=1)
+            eye_dir=1 if facing_down else -1
+            for ex_off in [-3,3]:
+                ex4=hx4+ex_off; ey4=hy4-2+eye_dir
+                pygame.draw.ellipse(self.screen,(248,248,252),(ex4-2,ey4-1,4,3))
+                pygame.draw.circle(self.screen,(55,88,145),(ex4,ey4+1),1)
+            pygame.draw.arc(self.screen,(185,95,85),(hx4-3,hy4+3,6,4),math.pi+0.4,2*math.pi-0.4,1)
+
+            # Hat with bevel highlight
             if hat_color:
-                pygame.draw.rect(self.screen, hat_color, (px_pos - 7, py_pos - 27 + bob, 14, 8), border_radius=3)
-                pygame.draw.rect(self.screen, hat_color, (px_pos - 9, py_pos - 21 + bob, 18, 3), border_radius=2)
+                hat_hi=tuple(min(255,v+38) for v in hat_color)
+                hat_shd=tuple(max(0,v-32) for v in hat_color)
+                pygame.draw.rect(self.screen,hat_shd,(hx4-head_r-2,hy4-head_r+2,head_r*2+4,5),border_radius=2)
+                pygame.draw.rect(self.screen,hat_color,(hx4-6,hy4-head_r-6,12,9),border_radius=3)
+                pygame.draw.rect(self.screen,hat_hi,(hx4-4,hy4-head_r-5,5,4),border_radius=2)
+                pygame.draw.circle(self.screen,(255,218,38),(hx4+2,hy4-head_r-2),2)
 
-            # role badge
+            # Role badge
             if label:
-                lsurf = font_sec.render(label, True, (220, 230, 245))
-                lw = lsurf.get_width()
-                pill = pygame.Surface((lw + 8, 13), pygame.SRCALPHA)
-                pygame.draw.rect(pill, (20, 22, 38, 180), pill.get_rect(), border_radius=6)
-                self.screen.blit(pill, (px_pos - lw // 2 - 4, py_pos + 24))
-                self.screen.blit(lsurf, (px_pos - lw // 2, py_pos + 26))
+                lsurf=font_sec.render(label,True,(225,235,248))
+                lw=lsurf.get_width()
+                pill=pygame.Surface((lw+8,13),pygame.SRCALPHA)
+                pygame.draw.rect(pill,(18,20,38,190),pill.get_rect(),border_radius=6)
+                self.screen.blit(pill,(px_pos-lw//2-4,py_pos+25))
+                self.screen.blit(lsurf,(px_pos-lw//2,py_pos+27))
 
-        # ── staff ambient characters (only shown when hired) ──────────────
-        corridor_x_fracs = [0.20, 0.42, 0.90]
-        game_char_xs = [floor.x + int(iw * f) for f in corridor_x_fracs]
-        CHAR_DETAILS = [
-            ((160,  95,  60), (18, 12,  8), (40, 48, 70), (24, 16, 12)),  # EMP
-            ((210, 170, 130), (90, 55, 20), (50, 44, 35), (30, 22, 18)),  # TRN
-            ((225, 190, 155), (60, 45, 30), (35, 38, 65), (25, 18, 14)),  # CSH
+        # ── Staff characters (only shown when hired) ──────────────────────
+        corridor_x_fracs=[0.20,0.42,0.90]
+        game_char_xs=[floor.x+int(iw*f) for f in corridor_x_fracs]
+        CHAR_DETAILS=[
+            ((160,95,60),(18,12,8),(40,48,70),(24,16,12)),
+            ((210,170,130),(90,55,20),(50,44,35),(30,22,18)),
+            ((225,190,155),(60,45,30),(35,38,65),(25,18,14)),
         ]
-        staff_hired = len(self.state.staff) if self.state else 0
-        for idx, ch in enumerate(self._preview_chars):
-            if staff_hired < (idx + 1):
+        staff_hired=len(self.state.staff) if self.state else 0
+        for idx,ch in enumerate(self._preview_chars):
+            if staff_hired < (idx+1):
                 continue
-            ch_x = game_char_xs[idx % len(game_char_xs)]
-            # Use live y updated by _update_staff_chars; clamp to floor bounds
-            ch_y = max(floor_y + 40, min(floor.bottom - 50, ch["y"]))
-            # paused = idle task stop; facing_down driven by direction of travel
-            paused      = ch["pause_t"] > 0
-            facing_down = ch["vy"] >= 0
-            sk, hr, pt, sh = CHAR_DETAILS[idx % len(CHAR_DETAILS)]
+            ch_x=game_char_xs[idx%len(game_char_xs)]
+            ch_y=max(floor_y+40,min(floor.bottom-50,ch["y"]))
+            paused=ch["pause_t"]>0; facing_down=ch["vy"]>=0
+            sk,hr,pt,sh=CHAR_DETAILS[idx%len(CHAR_DETAILS)]
             draw_person_walk_game(
-                ch_x, ch_y,
-                ch["body_col"], ch["hat_col"], ch["label"],
-                ch["carrying"], ch["walk_phase"], facing_down, paused,
-                skin_tone=sk, hair_color=hr, pant_color=pt, shoe_color=sh,
-            )
+                ch_x,ch_y,ch["body_col"],ch["hat_col"],ch["label"],
+                ch["carrying"],ch["walk_phase"],facing_down,paused,
+                skin_tone=sk,hair_color=hr,pant_color=pt,shoe_color=sh)
 
     def draw_hud(self):
         top = pygame.Rect(18, 12, WIDTH - 36, 56)
@@ -3272,7 +3513,7 @@ class App:
                 py_pos2  = int(self.player.y)
                 dist2    = math.sqrt((px_pos2 - cx)**2 + (py_pos2 - cy)**2)
                 if dist2 < 100 and not self.dialogue_customer:
-                    hint = get_font(SMALL_SIZE, bold=True).render("[E] Talk", True, (220, 240, 220))
+                    hint = get_font(SMALL_SIZE, bold=True).render("[F] Talk", True, (220, 240, 220))
                     hw2  = hint.get_width()
                     pill2= pygame.Surface((hw2 + 12, 16), pygame.SRCALPHA)
                     pygame.draw.rect(pill2, (30, 80, 40, 200), pill2.get_rect(), border_radius=8)
@@ -3324,7 +3565,7 @@ class App:
         # ── instruction line — drawn just above the card grid ───────────
         CONTENT_TOP = panel.y + 80     # clears title (y≈126) + ESC hint + breathing room
         hint = (f"Section: {section_label}   •   Press key to restock   •   "
-                f"Grey = go to that section first")
+                f"Grey = go to that section first  •  R/T/Y = Phone/Laptop/Router")
         draw_text(self.screen, hint,
                   (panel.x + 24, CONTENT_TOP - 22), size=SMALL_SIZE, color=TEXT_MUTED)
 
@@ -3368,7 +3609,8 @@ class App:
             self.screen.set_clip(rect.inflate(-2, -2))
 
             # Key label + product name
-            key_lbl  = str(idx + 1) if idx < 9 else "–"
+            _klabels = {9: "R", 10: "T", 11: "Y"}
+            key_lbl  = str(idx + 1) if idx < 9 else _klabels.get(idx, "–")
             txt_col  = TEXT if can_stock else TEXT_MUTED
             pygame.draw.circle(self.screen, prod_color if can_stock else OUTLINE,
                                (rect.x + 12, rect.y + 14), 5)
@@ -3531,7 +3773,8 @@ class App:
 
             # Colour pip + key number + product name
             pygame.draw.circle(self.screen, color, (rect.x + 12, rect.y + 16), 5)
-            key_label = str(idx + 1) if idx < 9 else "–"
+            _plabels = {9: "R", 10: "T", 11: "Y"}
+            key_label = str(idx + 1) if idx < 9 else _plabels.get(idx, "–")
             draw_text(self.screen, f"{key_label}. {PRODUCT_CATALOG[product_key]['name']}",
                       (rect.x + 22, rect.y + 9), size=SMALL_SIZE, bold=True)
 

@@ -15,9 +15,9 @@ PRODUCT_CATALOG = {
     "frz_fruit":   {"name": "Frozen Fruit",   "category": "frozen",  "base_price": 5.49,  "color": (160, 210, 255), "section": "frozen"},
     "frz_veg":     {"name": "Frozen Veg",     "category": "frozen",  "base_price": 4.75,  "color": (180, 240, 200), "section": "frozen"},
     "frz_protein": {"name": "Frozen Protein", "category": "frozen",  "base_price": 7.99,  "color": (255, 200, 180), "section": "frozen"},
-    "phone":       {"name": "Phone",          "category": "tech",    "base_price": 299.0, "color": ( 90, 170, 255), "section": "tech"},
-    "laptop":      {"name": "Laptop",         "category": "tech",    "base_price": 799.0, "color": (130, 215, 255), "section": "tech"},
-    "router":      {"name": "Wi-Fi Router",   "category": "tech",    "base_price": 89.0,  "color": ( 70, 190, 255), "section": "tech"},
+    "phone":       {"name": "Phone",          "category": "phone",   "base_price": 299.0, "color": ( 90, 170, 255), "section": "tech"},
+    "laptop":      {"name": "Laptop",         "category": "laptop",  "base_price": 799.0, "color": (130, 215, 255), "section": "tech"},
+    "router":      {"name": "Wi-Fi Router",   "category": "router",  "base_price": 89.0,  "color": ( 70, 190, 255), "section": "tech"},
 }
 
 SHELF_LAYOUT = {
@@ -27,7 +27,9 @@ SHELF_LAYOUT = {
     "produce": "apple",
     "deli":    "donut",
     "frozen":  "frz_fruit",
-    "tech":    "phone",
+    "phone":   "phone",
+    "laptop":  "laptop",
+    "router":  "router",
 }
 
 SECTION_PRODUCTS = {
