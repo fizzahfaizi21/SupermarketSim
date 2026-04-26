@@ -31,7 +31,8 @@ SupermarketSim/
 ├── requirements.txt
 └── .env                     # Your private keys (not committed)
 ```
-
+## IMPORTANT NOTE INSTALL PYTHON 3.12 OR EARLIER PYGAME DOES NOT WORK WITH 3.13+
+##IF MULTIPLE PYTHON VERSIONS ARE INSTALLED, RUN MAIN USING python3.11 main.py or py -3.11 main.py
 ## Step 1 — Create Firebase Project
 1. Go to [Firebase Console](https://console.firebase.google.com) and create a project.
 2. Add a **Realtime Database** — choose your region and start in test mode.
